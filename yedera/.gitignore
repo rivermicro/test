@@ -1,0 +1,18 @@
+# CMake and local build outputs
+build/
+cmake-build-*/
+CMakeUserPresets.json
+
+# Built binaries and test executables
+yedera
+yedera-config-tests
+yedera-runtime-tests
+
+# Local model artifacts
+*.gguf
+models/
+model/
+
+# Local RAG/document corpora and downloads
+rag/
+downloads/
