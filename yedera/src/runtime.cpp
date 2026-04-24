@@ -74,6 +74,29 @@ private:
     termios original_{};
 };
 
+class RuntimeLogRouterGuard {
+public:
+    RuntimeLogRouterGuard(DebugState * restore_state, bool enabled, bool verbose)
+        : restore_state_(restore_state), temporary_state_(*restore_state) {
+        temporary_state_.enabled = enabled;
+        temporary_state_.verbose = verbose;
+        temporary_state_.load_progress_bucket = -1;
+        temporary_state_.load_progress_active = false;
+        install_runtime_log_router(&temporary_state_);
+    }
+
+    RuntimeLogRouterGuard(const RuntimeLogRouterGuard &) = delete;
+    RuntimeLogRouterGuard & operator=(const RuntimeLogRouterGuard &) = delete;
+
+    ~RuntimeLogRouterGuard() {
+        install_runtime_log_router(restore_state_);
+    }
+
+private:
+    DebugState * restore_state_ = nullptr;
+    DebugState temporary_state_{};
+};
+
 void redraw_prompt(PromptMode mode, const std::string & buffer) {
     std::cout << '\r' << "\x1b[2K" << prompt_text(mode) << buffer << std::flush;
 }
@@ -141,6 +164,10 @@ std::string display_source_path(const std::string & source_path) {
 
 bool contains_text(const std::string & value, const std::string & needle) {
     return value.find(needle) != std::string::npos;
+}
+
+bool quiet_model_load_progress(float, void *) {
+    return true;
 }
 
 std::string to_lower(std::string value) {
@@ -302,10 +329,43 @@ std::vector<std::filesystem::path> expand_learn_entry_paths(
     return paths;
 }
 
-void print_rag_tuning_progress(const std::string & source_path, size_t completed, size_t total) {
-    const size_t percent = total == 0 ? 100 : std::min<size_t>(100, (completed * 100) / total);
-    std::cout << display_source_path(source_path) << " <" << percent << "% rag tuning>\n" << std::flush;
-}
+class EscLearnProgressRenderer {
+public:
+    void on_progress(const std::string & source_path, size_t completed, size_t total) {
+        const std::string display_path = display_source_path(source_path);
+        if (display_path != current_source_path_) {
+            current_source_path_ = display_path;
+            active_ = false;
+            std::cout << "+ " << current_source_path_ << std::flush;
+        }
+
+        if (total == 0) {
+            active_ = true;
+            return;
+        }
+
+        const size_t percent = std::min<size_t>(100, (completed * 100) / total);
+        if (percent >= 100) {
+            std::cout << '\r' << "\x1b[2K" << "+ " << current_source_path_ << '\n' << std::flush;
+            active_ = false;
+            return;
+        }
+
+        std::cout << '\r' << "\x1b[2K" << "+ " << current_source_path_ << ' ' << percent << '%' << std::flush;
+        active_ = true;
+    }
+
+    void finish() {
+        if (active_) {
+            std::cout << '\r' << "\x1b[2K" << "+ " << current_source_path_ << '\n' << std::flush;
+            active_ = false;
+        }
+    }
+
+private:
+    std::string current_source_path_;
+    bool active_ = false;
+};
 
 InteractiveReadResult read_interactive_input(PromptMode & mode, const std::vector<std::string> & chat_history) {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
@@ -354,9 +414,13 @@ InteractiveReadResult read_interactive_input(PromptMode & mode, const std::vecto
             return {InteractiveReadResult::Kind::Input, std::move(buffer)};
         }
 
-        if (byte == 3 || byte == 4) {
+        if (byte == 3) {
             std::cout << '\n' << std::flush;
             return {InteractiveReadResult::Kind::Eof, ""};
+        }
+
+        if (byte == 4) {
+            continue;
         }
 
         if (byte == 27) {
@@ -487,6 +551,8 @@ void run_inference(const Options & options) {
     if (options.debug) {
         model_params.progress_callback = handle_model_load_progress;
         model_params.progress_callback_user_data = &debug_state;
+    } else {
+        model_params.progress_callback = quiet_model_load_progress;
     }
 
     llama_model * model = llama_model_load_from_file(options.model_path.c_str(), model_params);
@@ -594,10 +660,14 @@ void run_inference(const Options & options) {
     auto run_turn = [&](const std::string & user_input) {
         const bool use_rag = should_use_rag_for_input(user_input);
         std::vector<OwnedMessage> prompt_messages = build_prompt_history(messages, user_input);
-        prompt_messages.push_back({"user", augment_prompt_with_rag(rag_state.get(), user_input)});
+        std::vector<std::string> retrieved_sources;
+        prompt_messages.push_back({"user", augment_prompt_with_rag(rag_state.get(), user_input, retrieved_sources)});
         const std::string rendered = format_messages(model, prompt_messages, formatted_buffer, true);
         const std::string response = generate(rendered);
         std::cout << '\n';
+        for (const std::string & source : retrieved_sources) {
+            std::cout << "→ " << source << '\n';
+        }
         messages.push_back({"user", user_input});
         if (use_rag) {
             messages.push_back({"assistant", response});
@@ -618,9 +688,6 @@ void run_inference(const Options & options) {
             }
 
             if (input.kind == InteractiveReadResult::Kind::Empty) {
-                if (prompt_mode == PromptMode::Chat) {
-                    break;
-                }
                 continue;
             }
 
@@ -628,6 +695,9 @@ void run_inference(const Options & options) {
 
             if (prompt_mode == PromptMode::LearnFile) {
                 try {
+                    Options quiet_learn_options = options;
+                    quiet_learn_options.debug = false;
+
                     const std::string trimmed_input = trim(user_input);
                     if (trimmed_input == "-") {
                         clear_rag_sources(rag_state);
@@ -650,14 +720,26 @@ void run_inference(const Options & options) {
 
                     const std::vector<std::filesystem::path> source_paths =
                         expand_learn_entry_paths(options, user_input, true);
+                    EscLearnProgressRenderer progress_renderer;
+                    RuntimeLogRouterGuard quiet_log_router(&debug_state, false, false);
                     if (trimmed_input == "*") {
-                        replace_rag_sources(rag_state, options, source_paths, print_rag_tuning_progress);
+                        replace_rag_sources(
+                            rag_state,
+                            quiet_learn_options,
+                            source_paths,
+                            [&](const std::string & source_path, size_t completed, size_t total) {
+                                progress_renderer.on_progress(source_path, completed, total);
+                            });
                     } else {
-                        learn_rag_sources(rag_state, options, source_paths, print_rag_tuning_progress);
+                        learn_rag_sources(
+                            rag_state,
+                            quiet_learn_options,
+                            source_paths,
+                            [&](const std::string & source_path, size_t completed, size_t total) {
+                                progress_renderer.on_progress(source_path, completed, total);
+                            });
                     }
-                    for (const auto & source_path : source_paths) {
-                        std::cout << "[rag] learned " << display_source_path(source_path.string()) << '\n';
-                    }
+                    progress_renderer.finish();
                     prompt_mode = PromptMode::Chat;
                 } catch (const std::exception & error) {
                     std::cerr << "error: " << error.what() << '\n';

@@ -3,7 +3,6 @@
 #include "ggml-backend.h"
 #include "llama.h"
 #include "paths.hpp"
-#include "token_list.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -95,26 +94,6 @@ std::string to_lower(std::string value) {
         return static_cast<char>(std::tolower(character));
     });
     return value;
-}
-
-std::vector<std::string> parse_index_at_startup_value(const std::string & raw_value) {
-    std::vector<std::string> tokens = parse_token_list(raw_value, "index_at_startup");
-    if (tokens.empty()) {
-        return {};
-    }
-
-    if (tokens.size() == 1) {
-        const std::string lowered = to_lower(tokens.front());
-        if (lowered == "false" || lowered == "no" || lowered == "off" || lowered == "0") {
-            return {};
-        }
-
-        if (lowered == "true" || lowered == "yes" || lowered == "on" || lowered == "1") {
-            return {"*"};
-        }
-    }
-
-    return tokens;
 }
 
 std::string resolve_config_relative_path(const std::filesystem::path & config_path, const std::string & value) {
@@ -238,7 +217,7 @@ OptionOverrides load_config_file(const std::filesystem::path & config_path, bool
             } else if (key == "rag_documents_path") {
                 overrides.rag_documents_path = value;
             } else if (key == "index_at_startup") {
-                overrides.index_at_startup = parse_index_at_startup_value(raw_value);
+                // Deprecated no-op. Startup RAG indexing has been removed.
             } else if (key == "prompt") {
                 overrides.system_prompt = value;
             } else if (key == "user_prompt") {
@@ -384,7 +363,6 @@ Options resolve_options(const OptionOverrides & cli_overrides) {
     apply_override(options.model_path, config_overrides.model_path);
     apply_override(options.model_embeddings, config_overrides.model_embeddings);
     apply_override(options.rag_documents_path, config_overrides.rag_documents_path);
-    apply_override(options.index_at_startup, config_overrides.index_at_startup);
     apply_override(options.prompt, config_overrides.user_prompt);
     apply_override(options.system_prompt, config_overrides.system_prompt);
     apply_override(options.n_ctx, config_overrides.n_ctx);
@@ -411,7 +389,6 @@ Options resolve_options(const OptionOverrides & cli_overrides) {
     apply_override(options.model_path, cli_overrides.model_path);
     apply_override(options.model_embeddings, cli_overrides.model_embeddings);
     apply_override(options.rag_documents_path, cli_overrides.rag_documents_path);
-    apply_override(options.index_at_startup, cli_overrides.index_at_startup);
     apply_override(options.prompt, cli_overrides.user_prompt);
     apply_override(options.system_prompt, cli_overrides.system_prompt);
     apply_override(options.n_ctx, cli_overrides.n_ctx);

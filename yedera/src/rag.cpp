@@ -2,12 +2,12 @@
 
 #include "llama.h"
 
-#include <fnmatch.h>
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -24,6 +24,38 @@ namespace {
 constexpr size_t kChunkSize = 800;
 constexpr size_t kChunkOverlap = 160;
 constexpr size_t kTopK = 3;
+
+class TemporaryDirectory {
+public:
+    explicit TemporaryDirectory(std::string_view name_template) {
+        const std::filesystem::path temp_root = std::filesystem::temp_directory_path();
+        std::string path_template = (temp_root / std::string(name_template)).string();
+        std::vector<char> writable_path(path_template.begin(), path_template.end());
+        writable_path.push_back('\0');
+
+        char * created_path = mkdtemp(writable_path.data());
+        if (created_path == nullptr) {
+            throw std::runtime_error("failed to create temporary directory");
+        }
+
+        path_ = created_path;
+    }
+
+    TemporaryDirectory(const TemporaryDirectory &) = delete;
+    TemporaryDirectory & operator=(const TemporaryDirectory &) = delete;
+
+    ~TemporaryDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    const std::filesystem::path & path() const {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
 
 void debug_log(const Options & options, const std::string & message) {
     if (options.debug) {
@@ -124,109 +156,6 @@ bool is_supported_document_file(const std::filesystem::path & path) {
            extension == ".yml" || extension == ".pdf" || extension == ".doc" || extension == ".docx";
 }
 
-bool contains_wildcard(const std::string & value) {
-    return value.find('*') != std::string::npos || value.find('?') != std::string::npos;
-}
-
-std::filesystem::path wildcard_search_root(const std::filesystem::path & pattern_path) {
-    std::filesystem::path root;
-    for (const auto & component : pattern_path) {
-        const std::string component_text = component.string();
-        if (contains_wildcard(component_text)) {
-            break;
-        }
-        root /= component;
-    }
-
-    if (root.empty()) {
-        return std::filesystem::current_path();
-    }
-
-    return root;
-}
-
-bool has_matched_directory_ancestor(
-    const std::filesystem::path & candidate_path,
-    const std::set<std::filesystem::path> & matched_directories) {
-    std::filesystem::path current = candidate_path.parent_path();
-    while (!current.empty()) {
-        if (matched_directories.find(current) != matched_directories.end()) {
-            return true;
-        }
-        current = current.parent_path();
-    }
-
-    return false;
-}
-
-std::vector<std::filesystem::path> expand_recursive_wildcard_paths(const std::filesystem::path & pattern_path) {
-    std::vector<std::filesystem::path> matches;
-    const std::filesystem::path search_root = wildcard_search_root(pattern_path);
-    std::error_code error;
-    if (!std::filesystem::exists(search_root, error) || error) {
-        return matches;
-    }
-
-    const std::string pattern_text = pattern_path.lexically_normal().string();
-    std::set<std::filesystem::path> matched_directories;
-    std::set<std::string> matched_paths;
-    for (const auto & entry : std::filesystem::recursive_directory_iterator(search_root)) {
-        const std::filesystem::path candidate = entry.path().lexically_normal();
-        const std::string candidate_text = candidate.string();
-        if (fnmatch(pattern_text.c_str(), candidate_text.c_str(), 0) != 0) {
-            continue;
-        }
-
-        if (has_matched_directory_ancestor(candidate, matched_directories)) {
-            continue;
-        }
-
-        if (matched_paths.insert(candidate_text).second) {
-            matches.push_back(candidate);
-        }
-
-        if (entry.is_directory()) {
-            matched_directories.insert(candidate);
-        }
-    }
-
-    std::sort(matches.begin(), matches.end());
-    return matches;
-}
-
-std::filesystem::path resolve_startup_index_path(const Options & options, const std::string & entry) {
-    const std::filesystem::path configured_path(entry);
-    if (configured_path.is_absolute() || options.rag_documents_path.empty()) {
-        return configured_path.lexically_normal();
-    }
-
-    return (std::filesystem::path(options.rag_documents_path) / configured_path).lexically_normal();
-}
-
-std::vector<std::filesystem::path> resolve_startup_source_paths(const Options & options) {
-    std::vector<std::filesystem::path> source_paths;
-    std::set<std::string> source_keys;
-
-    for (const std::string & entry : options.index_at_startup) {
-        const std::filesystem::path resolved_path = resolve_startup_index_path(options, entry);
-        const std::vector<std::filesystem::path> expanded_paths = contains_wildcard(resolved_path.string())
-            ? expand_recursive_wildcard_paths(resolved_path)
-            : std::vector<std::filesystem::path>{resolved_path};
-        const std::vector<std::filesystem::path> candidate_paths = expanded_paths.empty()
-            ? std::vector<std::filesystem::path>{resolved_path}
-            : expanded_paths;
-
-        for (const auto & candidate_path : candidate_paths) {
-            const std::filesystem::path normalized_path = candidate_path.lexically_normal();
-            if (source_keys.insert(normalized_path.string()).second) {
-                source_paths.push_back(normalized_path);
-            }
-        }
-    }
-
-    return source_paths;
-}
-
 std::vector<std::filesystem::path> collect_document_files(const std::filesystem::path & documents_path) {
     std::vector<std::filesystem::path> files;
 
@@ -281,10 +210,95 @@ bool looks_like_rtf_document(const std::filesystem::path & path) {
     return starts_with_bytes(prefix, "{\\rtf");
 }
 
+int ocr_page_number(const std::filesystem::path & image_path) {
+    const std::string stem = image_path.stem().string();
+    constexpr std::string_view prefix = "page-";
+    if (stem.rfind(prefix, 0) != 0) {
+        return 0;
+    }
+
+    try {
+        return std::stoi(stem.substr(prefix.size()));
+    } catch (const std::exception &) {
+        return 0;
+    }
+}
+
+std::vector<std::filesystem::path> collect_ocr_page_images(const std::filesystem::path & directory) {
+    std::vector<std::filesystem::path> page_images;
+    for (const auto & entry : std::filesystem::directory_iterator(directory)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+
+        if (to_lower(entry.path().extension().string()) == ".png") {
+            page_images.push_back(entry.path());
+        }
+    }
+
+    std::sort(page_images.begin(), page_images.end(), [](const auto & left, const auto & right) {
+        const int left_page = ocr_page_number(left);
+        const int right_page = ocr_page_number(right);
+        if (left_page != right_page) {
+            return left_page < right_page;
+        }
+        return left < right;
+    });
+    return page_images;
+}
+
+std::optional<std::string> try_extract_pdf_text_with_ocr(const std::filesystem::path & path) {
+    TemporaryDirectory temp_dir("yedera-pdf-ocr-XXXXXX");
+    const std::filesystem::path page_prefix = temp_dir.path() / "page";
+    const std::string render_command =
+        "pdftoppm -r 200 -png " + shell_quote(path.string()) + " " + shell_quote(page_prefix.string());
+    if (!try_capture_command_output(render_command).has_value()) {
+        return std::nullopt;
+    }
+
+    const std::vector<std::filesystem::path> page_images = collect_ocr_page_images(temp_dir.path());
+    if (page_images.empty()) {
+        return std::nullopt;
+    }
+
+    std::string text;
+    for (const auto & page_image : page_images) {
+        const std::optional<std::string> page_text =
+            try_capture_command_output("tesseract " + shell_quote(page_image.string()) + " stdout");
+        if (!page_text.has_value()) {
+            return std::nullopt;
+        }
+
+        if (!text.empty() && !page_text->empty() && text.back() != '\n') {
+            text += '\n';
+        }
+        text += *page_text;
+    }
+
+    return text;
+}
+
 std::string extract_pdf_text(const std::filesystem::path & path) {
-    return capture_command_output(
-        "pdftotext -enc UTF-8 -nopgbrk " + shell_quote(path.string()) + " -",
-        "failed to extract text from PDF document: " + path.string());
+    const std::optional<std::string> embedded_text = try_capture_command_output(
+        "pdftotext -enc UTF-8 -nopgbrk " + shell_quote(path.string()) + " -");
+    if (embedded_text.has_value() && !trim(*embedded_text).empty()) {
+        return *embedded_text;
+    }
+
+    const std::optional<std::string> ocr_text = try_extract_pdf_text_with_ocr(path);
+    if (ocr_text.has_value()) {
+        return *ocr_text;
+    }
+
+    if (embedded_text.has_value()) {
+        throw std::runtime_error(
+            "failed to extract text from PDF document: " + path.string() +
+            ". pdftotext found no embedded text, and OCR fallback failed. Install pdftoppm and tesseract for scanned PDFs.");
+    }
+
+    throw std::runtime_error(
+        "failed to extract text from PDF document: " + path.string() +
+        ". Install poppler-utils for pdftotext/pdftoppm and tesseract for OCR.");
 }
 
 std::string extract_docx_text(const std::filesystem::path & path) {
@@ -400,12 +414,17 @@ float cosine_similarity(const std::vector<float> & left, const std::vector<float
     return similarity;
 }
 
+bool quiet_model_load_progress(float, void *) {
+    return true;
+}
+
 class EmbeddingEngine {
 public:
     EmbeddingEngine(const Options & options, const std::filesystem::path & model_path)
         : options_(options), model_path_(model_path) {
         llama_model_params model_params = llama_model_default_params();
         model_params.n_gpu_layers = options_.n_gpu_layers;
+        model_params.progress_callback = quiet_model_load_progress;
         model_ = llama_model_load_from_file(model_path_.c_str(), model_params);
         if (model_ == nullptr) {
             throw std::runtime_error("failed to load embeddings model: " + model_path_.string());
@@ -630,28 +649,34 @@ void index_rag_sources(
     size_t indexed_documents = 0;
     size_t indexed_chunks = 0;
     for (const auto & document_file : document_files) {
+        const std::string source = display_source_path(document_file);
+        if (progress_callback) {
+            progress_callback(source, 0, 0);
+        }
+
         const std::string file_contents = read_document_file(document_file);
         const std::vector<std::string> document_chunks = split_into_chunks(file_contents);
-        const std::string source = display_source_path(document_file);
         debug_file_log(options, source);
         if (document_chunks.empty()) {
             ++processed_documents;
             if (progress_callback) {
-                progress_callback(source, processed_documents, document_files.size());
+                progress_callback(source, 1, 1);
             }
             continue;
         }
 
         ++indexed_documents;
         indexed_chunks += document_chunks.size();
+        size_t indexed_file_chunks = 0;
         for (const std::string & chunk_text : document_chunks) {
             rag_state.chunks.push_back({source, chunk_text, rag_state.engine.embed(chunk_text)});
+            ++indexed_file_chunks;
+            if (progress_callback) {
+                progress_callback(source, indexed_file_chunks, document_chunks.size());
+            }
         }
 
         ++processed_documents;
-        if (progress_callback) {
-            progress_callback(source, processed_documents, document_files.size());
-        }
     }
 
     if (indexed_chunks == 0) {
@@ -673,19 +698,8 @@ void index_rag_source(
 }
 
 RagStatePtr create_rag_state(const Options & options) {
-    if (options.rag_documents_path.empty()) {
-        return RagStatePtr(nullptr, destroy_rag_state);
-    }
-
-    const std::vector<std::filesystem::path> source_paths = resolve_startup_source_paths(options);
-    if (source_paths.empty()) {
-        debug_log(options, "startup indexing disabled");
-        return RagStatePtr(nullptr, destroy_rag_state);
-    }
-
-    RagStatePtr rag_state = create_empty_rag_state(options);
-    index_rag_sources(*rag_state, options, source_paths, {});
-    return rag_state;
+    (void) options;
+    return RagStatePtr(nullptr, destroy_rag_state);
 }
 
 void learn_rag_source(
@@ -807,7 +821,11 @@ std::string format_rag_prompt(const std::string & retrieved_context, const std::
            retrieved_context + "User question:\n" + user_input;
 }
 
-std::string augment_prompt_with_rag(RagState * rag_state, const std::string & user_input) {
+std::string augment_prompt_with_rag(
+    RagState * rag_state,
+    const std::string & user_input,
+    std::vector<std::string> & retrieved_sources) {
+    retrieved_sources.clear();
     if (rag_state == nullptr || !should_use_rag_for_input(user_input)) {
         return user_input;
     }
@@ -835,15 +853,20 @@ std::string augment_prompt_with_rag(RagState * rag_state, const std::string & us
     }
 
     std::string retrieved_context;
+    std::set<std::string> seen_sources;
     for (size_t rank = 0; rank < retrieved_count; ++rank) {
         const IndexedChunk & chunk = rag_state->chunks[scored_chunks[rank].index];
         retrieved_context += chunk.text;
         retrieved_context += "\n\n";
-    }
-
-    if (rag_state->options.debug) {
-        std::cerr << "[retrieved " << retrieved_count << " chunks]\n";
+        if (seen_sources.insert(chunk.source).second) {
+            retrieved_sources.push_back(chunk.source);
+        }
     }
 
     return format_rag_prompt(retrieved_context, user_input);
+}
+
+std::string augment_prompt_with_rag(RagState * rag_state, const std::string & user_input) {
+    std::vector<std::string> retrieved_sources;
+    return augment_prompt_with_rag(rag_state, user_input, retrieved_sources);
 }

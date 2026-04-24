@@ -55,22 +55,6 @@ void write_file(const std::filesystem::path & path, const std::string & content)
     output << content;
 }
 
-std::vector<std::string> resolve_index_at_startup(const std::string & value) {
-    const TempDirectory temp_dir;
-    const std::filesystem::path config_path = temp_dir.path / "yedera.conf";
-    write_file(
-        config_path,
-        "prompt = \"system prompt\"\n"
-        "model_path = \"model.gguf\"\n"
-        "rag_documents_path = \"rag\"\n"
-        "index_at_startup = " + value + "\n"
-        "n_gpu_layers = 0\n");
-
-    OptionOverrides overrides;
-    overrides.config_path = config_path.string();
-    return resolve_options(overrides).index_at_startup;
-}
-
 void test_parse_args_collects_flags_and_prompt() {
     std::vector<std::string> values = {
         "yedera",
@@ -198,50 +182,6 @@ void test_resolve_options_resolves_relative_config_paths() {
     expect_equal(resolved.rag_documents_path, (config_dir / "rag").lexically_normal().string(), "rag_documents_path should resolve relative to the config file");
 }
 
-void test_resolve_options_disables_startup_indexing_by_default() {
-    const TempDirectory temp_dir;
-    const std::filesystem::path config_path = temp_dir.path / "yedera.conf";
-    write_file(
-        config_path,
-        "prompt = \"system prompt\"\n"
-        "model_path = \"model.gguf\"\n"
-        "model_embeddings = \"embed.gguf\"\n"
-        "rag_documents_path = \"rag\"\n"
-        "n_gpu_layers = 0\n");
-
-    OptionOverrides overrides;
-    overrides.config_path = config_path.string();
-
-    const Options resolved = resolve_options(overrides);
-    expect_true(resolved.index_at_startup.empty(), "startup indexing should be disabled unless index_at_startup is configured");
-}
-
-void test_resolve_options_parses_index_at_startup_patterns() {
-    expect_equal(resolve_index_at_startup("*"), std::vector<std::string>{"*"}, "bare star should index everything at startup");
-    expect_equal(resolve_index_at_startup("*.pdf"), std::vector<std::string>{"*.pdf"}, "bare wildcard should parse as one startup pattern");
-    expect_equal(resolve_index_at_startup("\"*.pdf\""), std::vector<std::string>{"*.pdf"}, "quoted wildcard should parse as one startup pattern");
-    expect_equal(
-        resolve_index_at_startup("\"*.txt\", *.pdf"),
-        std::vector<std::string>({"*.txt", "*.pdf"}),
-        "comma-separated quoted and bare wildcards should parse correctly");
-    expect_equal(
-        resolve_index_at_startup("\"*.txt\" \"*.pdf\""),
-        std::vector<std::string>({"*.txt", "*.pdf"}),
-        "space-separated quoted wildcards should parse correctly");
-    expect_equal(
-        resolve_index_at_startup("file1, file2, file3, *.txt"),
-        std::vector<std::string>({"file1", "file2", "file3", "*.txt"}),
-        "comma-separated file names and wildcards should parse correctly");
-    expect_equal(
-        resolve_index_at_startup("\"file1\", \"file2\", \"file3\", *.txt"),
-        std::vector<std::string>({"file1", "file2", "file3", "*.txt"}),
-        "quoted comma-separated file names should parse correctly");
-    expect_equal(
-        resolve_index_at_startup("\"file1\" \"file2\" \"file3\" *.txt"),
-        std::vector<std::string>({"file1", "file2", "file3", "*.txt"}),
-        "quoted space-separated file names should parse correctly");
-    expect_equal(resolve_index_at_startup("off"), std::vector<std::string>{}, "off should disable startup indexing");
-}
 
 void test_plan_model_download_maps_known_alias() {
     const TempDirectory temp_dir;
@@ -301,8 +241,6 @@ int main() {
         test_resolve_options_defaults_to_interactive_without_prompt();
         test_resolve_options_rejects_invalid_debug_value();
         test_resolve_options_resolves_relative_config_paths();
-        test_resolve_options_disables_startup_indexing_by_default();
-        test_resolve_options_parses_index_at_startup_patterns();
         test_plan_model_download_maps_known_alias();
         test_plan_model_download_skips_existing_file();
         test_format_rag_prompt_prefers_direct_fact_lookup();

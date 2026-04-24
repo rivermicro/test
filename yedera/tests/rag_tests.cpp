@@ -384,44 +384,6 @@ void test_forget_unknown_file_is_a_noop() {
     expect_equal(rag_chunk_count_for_source(rag_state.get(), file_a), static_cast<size_t>(1), "forgetting an unknown file should keep the known file intact");
 }
 
-void test_create_rag_state_honors_index_at_startup_patterns() {
-    const TempDirectory temp_dir;
-    const std::filesystem::path rag_dir = temp_dir.path / "rag";
-    const std::filesystem::path nested_dir = rag_dir / "nested";
-    std::filesystem::create_directories(nested_dir);
-
-    const std::filesystem::path txt_file = rag_dir / "alpha.txt";
-    const std::filesystem::path md_file = rag_dir / "beta.md";
-    const std::filesystem::path nested_txt_file = nested_dir / "gamma.txt";
-    write_file(txt_file, "alpha startup token: saffron gate.\n");
-    write_file(md_file, "beta startup token: basil arch.\n");
-    write_file(nested_txt_file, "gamma startup token: copper stair.\n");
-
-    Options options = make_rag_options();
-    options.rag_documents_path = rag_dir.string();
-    options.index_at_startup = {"*.txt"};
-
-    RagStatePtr rag_state = create_rag_state(options);
-    expect_true(static_cast<bool>(rag_state), "startup indexing should create a RAG state when patterns are configured");
-    expect_true(rag_chunk_count_for_source(rag_state.get(), txt_file) > 0, "startup indexing should include matching top-level files");
-    expect_true(rag_chunk_count_for_source(rag_state.get(), nested_txt_file) > 0, "startup indexing should match nested files recursively");
-    expect_equal(rag_chunk_count_for_source(rag_state.get(), md_file), static_cast<size_t>(0), "startup indexing should skip files outside the configured patterns");
-}
-
-void test_create_rag_state_can_skip_startup_indexing() {
-    const TempDirectory temp_dir;
-    const std::filesystem::path rag_dir = temp_dir.path / "rag";
-    std::filesystem::create_directories(rag_dir);
-    write_file(rag_dir / "alpha.txt", "alpha startup token: saffron gate.\n");
-
-    Options options = make_rag_options();
-    options.rag_documents_path = rag_dir.string();
-    options.index_at_startup = {};
-
-    RagStatePtr rag_state = create_rag_state(options);
-    expect_true(!rag_state, "empty startup patterns should skip startup indexing");
-}
-
 void test_learn_pdf_doc_and_docx_files_extract_text() {
     const TempDirectory temp_dir;
     const std::filesystem::path rag_dir = temp_dir.path / "rag";
@@ -468,8 +430,6 @@ int main() {
             {"forget single file removes only target file", test_forget_single_file_removes_only_target_file},
             {"forget all clears rag state", test_forget_all_clears_rag_state},
             {"forget unknown file is a noop", test_forget_unknown_file_is_a_noop},
-            {"create rag state honors index_at_startup patterns", test_create_rag_state_honors_index_at_startup_patterns},
-            {"create rag state can skip startup indexing", test_create_rag_state_can_skip_startup_indexing},
             {"learn pdf doc and docx files extract text", test_learn_pdf_doc_and_docx_files_extract_text},
         };
 

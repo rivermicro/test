@@ -113,25 +113,9 @@ if (BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
 
     add_test(
-        NAME yedera-cli-rag-startup-test
+        NAME yedera-cli-no-startup-rag-test
         COMMAND ${CMAKE_COMMAND}
-            -DCASE=rag_startup
-            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
-            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
-
-    add_test(
-        NAME yedera-cli-startup-rag-disabled-test
-        COMMAND ${CMAKE_COMMAND}
-            -DCASE=startup_rag_disabled
-            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
-            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
-
-    add_test(
-        NAME yedera-cli-index-at-startup-test
-        COMMAND ${CMAKE_COMMAND}
-            -DCASE=index_at_startup
+            -DCASE=no_startup_rag
             -DYEDERA_BINARY=$<TARGET_FILE:yedera>
             -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
@@ -150,9 +134,7 @@ if (BUILD_TESTING)
         yedera-cli-current-dir-config-test
         yedera-cli-home-config-test
         yedera-cli-missing-config-test
-        yedera-cli-rag-startup-test
-        yedera-cli-startup-rag-disabled-test
-        yedera-cli-index-at-startup-test
+        yedera-cli-no-startup-rag-test
         yedera-cli-learn-multi-entry-test
         PROPERTIES TIMEOUT 180)
 endif()

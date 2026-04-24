@@ -40,3 +40,7 @@ size_t rag_chunk_count_for_source(const RagState * rag_state, const std::filesys
 bool should_use_rag_for_input(const std::string & user_input);
 std::string format_rag_prompt(const std::string & retrieved_context, const std::string & user_input);
 std::string augment_prompt_with_rag(RagState * rag_state, const std::string & user_input);
+std::string augment_prompt_with_rag(
+    RagState * rag_state,
+    const std::string & user_input,
+    std::vector<std::string> & retrieved_sources);

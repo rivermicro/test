@@ -64,7 +64,7 @@ Direct GGUF path override:
 
 Set `debug = true` in `yedera.conf` to print startup diagnostics to `stderr`, including CUDA detection and toolkit version, model loading progress, and GPU/CPU offload details.
 
-For local RAG, point `model_embeddings` at a local GGUF embeddings model and `rag_documents_path` at a file or directory of text documents. Startup indexing is disabled by default because large corpora can make launch slow. Set `index_at_startup = *` or a pattern list such as `index_at_startup = "*.txt", *.pdf` when you want startup indexing to run. Relative paths in `yedera.conf` resolve from the config file directory, so `model_embeddings = "model/...gguf"` and `rag_documents_path = "rag"` work next to the binary.
+For local RAG, point `model_embeddings` at a local GGUF embeddings model and `rag_documents_path` at a file or directory of text documents. Documents are learned only during the session through `/learn` or `Esc` file-learn mode; yedera does not index RAG documents at startup. Relative paths in `yedera.conf` resolve from the config file directory, so `model_embeddings = "model/...gguf"` and `rag_documents_path = "rag"` work next to the binary. PDF ingestion uses embedded text first through `pdftotext`; when no embedded text is found, it falls back to OCR with `pdftoppm` and `tesseract`.
 
 ## Options
 
@@ -105,8 +105,8 @@ seed = random
 
 If `n_gpu_layers` is omitted, `yedera` automatically uses NVIDIA GPU offload when the build includes CUDA and a GPU is visible. Set `n_gpu_layers = 0` to force CPU-only mode or a positive integer to cap offloaded layers.
 
-Supported keys are `prompt`, `model_path`, `model_embeddings`, `rag_documents_path`, `index_at_startup`, `user_prompt`, `ctx_size`, `n_predict`, `n_gpu_layers`, `temperature`, `top_p`, `min_p`, `seed`, `interactive`, `verbose`, and `debug`. `system_prompt` is still accepted as a backward-compatible alias for `prompt`.
+Supported keys are `prompt`, `model_path`, `model_embeddings`, `rag_documents_path`, `user_prompt`, `ctx_size`, `n_predict`, `n_gpu_layers`, `temperature`, `top_p`, `min_p`, `seed`, `interactive`, `verbose`, and `debug`. `system_prompt` is still accepted as a backward-compatible alias for `prompt`.
 
-When `model_path` or `model_embeddings` points at a built-in alias under `model/` and the file is missing, `yedera` downloads the GGUF automatically at startup into the configured path. When `model_embeddings`, `rag_documents_path`, and `index_at_startup` are all configured, `yedera` indexes the matching documents locally at startup and prepends the most relevant chunks to each user turn.
+When `model_path` or `model_embeddings` points at a built-in alias under `model/` and the file is missing, `yedera` downloads the GGUF automatically at startup into the configured path. When `model_embeddings` and `rag_documents_path` are configured, `/learn` and `Esc` file-learn mode can index documents for the current session and prepend the most relevant chunks to each user turn.
 
 The assistant prompt now lives directly in [yedera.conf](yedera.conf) as `prompt = "..."`.

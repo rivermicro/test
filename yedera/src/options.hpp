@@ -5,14 +5,12 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <vector>
 
 struct Options {
     std::string config_path;
     std::string model_path;
     std::string model_embeddings;
     std::string rag_documents_path;
-    std::vector<std::string> index_at_startup;
     std::string prompt;
     std::string system_prompt;
     int n_ctx = 2048;
@@ -33,7 +31,6 @@ struct OptionOverrides {
     std::optional<std::string> model_path;
     std::optional<std::string> model_embeddings;
     std::optional<std::string> rag_documents_path;
-    std::optional<std::vector<std::string>> index_at_startup;
     std::optional<std::string> user_prompt;
     std::optional<std::string> system_prompt;
     std::optional<int> n_ctx;
