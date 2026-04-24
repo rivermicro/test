@@ -2,16 +2,21 @@
 
 #include "llama.h"
 
+#include <fnmatch.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -53,6 +58,49 @@ bool contains_text(const std::string & value, const std::string & needle) {
     return value.find(needle) != std::string::npos;
 }
 
+std::string shell_quote(std::string_view value) {
+    std::string quoted = "'";
+    for (const char character : value) {
+        if (character == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted += character;
+        }
+    }
+    quoted += "'";
+    return quoted;
+}
+
+std::optional<std::string> try_capture_command_output(const std::string & command) {
+    std::array<char, 4096> buffer{};
+    std::string output;
+
+    FILE * pipe = popen((command + " 2>/dev/null").c_str(), "r");
+    if (pipe == nullptr) {
+        return std::nullopt;
+    }
+
+    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        output += buffer.data();
+    }
+
+    const int status = pclose(pipe);
+    if (status != 0) {
+        return std::nullopt;
+    }
+
+    return output;
+}
+
+std::string capture_command_output(const std::string & command, const std::string & error_message) {
+    const std::optional<std::string> output = try_capture_command_output(command);
+    if (!output.has_value()) {
+        throw std::runtime_error(error_message);
+    }
+
+    return *output;
+}
+
 bool contains_digit(const std::string & value) {
     return std::any_of(value.begin(), value.end(), [](unsigned char character) {
         return std::isdigit(character);
@@ -73,7 +121,110 @@ bool is_supported_document_file(const std::filesystem::path & path) {
     const std::string extension = to_lower(path.extension().string());
     return extension == ".txt" || extension == ".md" || extension == ".markdown" || extension == ".rst" ||
            extension == ".log" || extension == ".csv" || extension == ".json" || extension == ".yaml" ||
-           extension == ".yml";
+           extension == ".yml" || extension == ".pdf" || extension == ".doc" || extension == ".docx";
+}
+
+bool contains_wildcard(const std::string & value) {
+    return value.find('*') != std::string::npos || value.find('?') != std::string::npos;
+}
+
+std::filesystem::path wildcard_search_root(const std::filesystem::path & pattern_path) {
+    std::filesystem::path root;
+    for (const auto & component : pattern_path) {
+        const std::string component_text = component.string();
+        if (contains_wildcard(component_text)) {
+            break;
+        }
+        root /= component;
+    }
+
+    if (root.empty()) {
+        return std::filesystem::current_path();
+    }
+
+    return root;
+}
+
+bool has_matched_directory_ancestor(
+    const std::filesystem::path & candidate_path,
+    const std::set<std::filesystem::path> & matched_directories) {
+    std::filesystem::path current = candidate_path.parent_path();
+    while (!current.empty()) {
+        if (matched_directories.find(current) != matched_directories.end()) {
+            return true;
+        }
+        current = current.parent_path();
+    }
+
+    return false;
+}
+
+std::vector<std::filesystem::path> expand_recursive_wildcard_paths(const std::filesystem::path & pattern_path) {
+    std::vector<std::filesystem::path> matches;
+    const std::filesystem::path search_root = wildcard_search_root(pattern_path);
+    std::error_code error;
+    if (!std::filesystem::exists(search_root, error) || error) {
+        return matches;
+    }
+
+    const std::string pattern_text = pattern_path.lexically_normal().string();
+    std::set<std::filesystem::path> matched_directories;
+    std::set<std::string> matched_paths;
+    for (const auto & entry : std::filesystem::recursive_directory_iterator(search_root)) {
+        const std::filesystem::path candidate = entry.path().lexically_normal();
+        const std::string candidate_text = candidate.string();
+        if (fnmatch(pattern_text.c_str(), candidate_text.c_str(), 0) != 0) {
+            continue;
+        }
+
+        if (has_matched_directory_ancestor(candidate, matched_directories)) {
+            continue;
+        }
+
+        if (matched_paths.insert(candidate_text).second) {
+            matches.push_back(candidate);
+        }
+
+        if (entry.is_directory()) {
+            matched_directories.insert(candidate);
+        }
+    }
+
+    std::sort(matches.begin(), matches.end());
+    return matches;
+}
+
+std::filesystem::path resolve_startup_index_path(const Options & options, const std::string & entry) {
+    const std::filesystem::path configured_path(entry);
+    if (configured_path.is_absolute() || options.rag_documents_path.empty()) {
+        return configured_path.lexically_normal();
+    }
+
+    return (std::filesystem::path(options.rag_documents_path) / configured_path).lexically_normal();
+}
+
+std::vector<std::filesystem::path> resolve_startup_source_paths(const Options & options) {
+    std::vector<std::filesystem::path> source_paths;
+    std::set<std::string> source_keys;
+
+    for (const std::string & entry : options.index_at_startup) {
+        const std::filesystem::path resolved_path = resolve_startup_index_path(options, entry);
+        const std::vector<std::filesystem::path> expanded_paths = contains_wildcard(resolved_path.string())
+            ? expand_recursive_wildcard_paths(resolved_path)
+            : std::vector<std::filesystem::path>{resolved_path};
+        const std::vector<std::filesystem::path> candidate_paths = expanded_paths.empty()
+            ? std::vector<std::filesystem::path>{resolved_path}
+            : expanded_paths;
+
+        for (const auto & candidate_path : candidate_paths) {
+            const std::filesystem::path normalized_path = candidate_path.lexically_normal();
+            if (source_keys.insert(normalized_path.string()).second) {
+                source_paths.push_back(normalized_path);
+            }
+        }
+    }
+
+    return source_paths;
 }
 
 std::vector<std::filesystem::path> collect_document_files(const std::filesystem::path & documents_path) {
@@ -103,6 +254,82 @@ std::string read_text_file(const std::filesystem::path & path) {
     }
 
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+std::string read_file_prefix(const std::filesystem::path & path, size_t max_bytes) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) {
+        throw std::runtime_error("failed to open RAG document: " + path.string());
+    }
+
+    std::string prefix(max_bytes, '\0');
+    input.read(prefix.data(), static_cast<std::streamsize>(max_bytes));
+    prefix.resize(static_cast<size_t>(input.gcount()));
+    return prefix;
+}
+
+bool starts_with_bytes(const std::string & value, std::string_view prefix) {
+    return value.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), value.begin());
+}
+
+bool looks_like_rtf_document(const std::filesystem::path & path) {
+    std::string prefix = read_file_prefix(path, 16);
+    if (starts_with_bytes(prefix, "\xEF\xBB\xBF")) {
+        prefix.erase(0, 3);
+    }
+
+    return starts_with_bytes(prefix, "{\\rtf");
+}
+
+std::string extract_pdf_text(const std::filesystem::path & path) {
+    return capture_command_output(
+        "pdftotext -enc UTF-8 -nopgbrk " + shell_quote(path.string()) + " -",
+        "failed to extract text from PDF document: " + path.string());
+}
+
+std::string extract_docx_text(const std::filesystem::path & path) {
+    return capture_command_output(
+        "pandoc --from=docx --to=plain --wrap=none " + shell_quote(path.string()),
+        "failed to extract text from DOCX document: " + path.string());
+}
+
+std::string extract_rtf_doc_text(const std::filesystem::path & path) {
+    return capture_command_output(
+        "pandoc --from=rtf --to=plain --wrap=none " + shell_quote(path.string()),
+        "failed to extract text from DOC document: " + path.string());
+}
+
+std::string extract_legacy_doc_text(const std::filesystem::path & path) {
+    if (const std::optional<std::string> antiword_output =
+            try_capture_command_output("antiword " + shell_quote(path.string()))) {
+        return *antiword_output;
+    }
+
+    if (const std::optional<std::string> catdoc_output =
+            try_capture_command_output("catdoc " + shell_quote(path.string()))) {
+        return *catdoc_output;
+    }
+
+    throw std::runtime_error(
+        "failed to extract text from DOC document: " + path.string() +
+        ". Install antiword or catdoc for legacy .doc files, or provide an RTF-backed .doc file.");
+}
+
+std::string read_document_file(const std::filesystem::path & path) {
+    const std::string extension = to_lower(path.extension().string());
+    if (extension == ".pdf") {
+        return extract_pdf_text(path);
+    }
+
+    if (extension == ".docx") {
+        return extract_docx_text(path);
+    }
+
+    if (extension == ".doc") {
+        return looks_like_rtf_document(path) ? extract_rtf_doc_text(path) : extract_legacy_doc_text(path);
+    }
+
+    return read_text_file(path);
 }
 
 std::vector<std::string> split_into_chunks(const std::string & text) {
@@ -280,6 +507,49 @@ std::string display_source_path(const std::filesystem::path & file_path) {
     return normalize_source_path(file_path).string();
 }
 
+std::vector<std::filesystem::path> resolve_document_files(const std::vector<std::filesystem::path> & source_paths) {
+    if (source_paths.empty()) {
+        throw std::runtime_error("RAG source does not exist");
+    }
+
+    std::vector<std::filesystem::path> document_files;
+    std::set<std::string> document_file_keys;
+    for (const auto & source_path : source_paths) {
+        for (const auto & document_file : collect_document_files(source_path)) {
+            const std::filesystem::path normalized_file = normalize_source_path(document_file);
+            if (document_file_keys.insert(normalized_file.string()).second) {
+                document_files.push_back(normalized_file);
+            }
+        }
+    }
+
+    std::sort(document_files.begin(), document_files.end());
+    return document_files;
+}
+
+std::set<std::string> resolve_source_keys(const std::vector<std::filesystem::path> & source_paths) {
+    std::set<std::string> source_keys;
+
+    for (const auto & source_path : source_paths) {
+        std::error_code error;
+        if (std::filesystem::exists(source_path, error) && !error) {
+            if (std::filesystem::is_directory(source_path, error) && !error) {
+                for (const auto & document_file : collect_document_files(source_path)) {
+                    source_keys.insert(display_source_path(document_file));
+                }
+                continue;
+            }
+
+            source_keys.insert(display_source_path(source_path));
+            continue;
+        }
+
+        source_keys.insert(display_source_path(source_path));
+    }
+
+    return source_keys;
+}
+
 } // namespace
 
 struct RagState {
@@ -291,6 +561,25 @@ struct RagState {
     EmbeddingEngine engine;
     std::vector<IndexedChunk> chunks;
 };
+
+namespace {
+
+void erase_rag_sources(RagState & rag_state, const std::set<std::string> & source_keys) {
+    if (source_keys.empty()) {
+        return;
+    }
+
+    rag_state.chunks.erase(
+        std::remove_if(
+            rag_state.chunks.begin(),
+            rag_state.chunks.end(),
+            [&](const IndexedChunk & chunk) {
+                return source_keys.find(chunk.source) != source_keys.end();
+            }),
+        rag_state.chunks.end());
+}
+
+} // namespace
 
 void destroy_rag_state(RagState * rag_state) {
     delete rag_state;
@@ -322,23 +611,15 @@ void index_rag_sources(
         throw std::runtime_error("RAG source does not exist");
     }
 
-    std::vector<std::filesystem::path> document_files;
-    std::set<std::string> document_file_keys;
     for (const auto & source_path : source_paths) {
         if (!std::filesystem::exists(source_path)) {
             throw std::runtime_error("RAG source does not exist: " + source_path.string());
         }
 
         debug_log(options, "indexing documents from " + display_source_path(source_path));
-        for (const auto & document_file : collect_document_files(source_path)) {
-            const std::filesystem::path normalized_file = normalize_source_path(document_file);
-            if (document_file_keys.insert(normalized_file.string()).second) {
-                document_files.push_back(normalized_file);
-            }
-        }
     }
 
-    std::sort(document_files.begin(), document_files.end());
+    const std::vector<std::filesystem::path> document_files = resolve_document_files(source_paths);
     if (document_files.empty()) {
         throw std::runtime_error("no readable RAG documents found in: " + source_paths.front().string());
     }
@@ -349,7 +630,7 @@ void index_rag_sources(
     size_t indexed_documents = 0;
     size_t indexed_chunks = 0;
     for (const auto & document_file : document_files) {
-        const std::string file_contents = read_text_file(document_file);
+        const std::string file_contents = read_document_file(document_file);
         const std::vector<std::string> document_chunks = split_into_chunks(file_contents);
         const std::string source = display_source_path(document_file);
         debug_file_log(options, source);
@@ -396,8 +677,14 @@ RagStatePtr create_rag_state(const Options & options) {
         return RagStatePtr(nullptr, destroy_rag_state);
     }
 
+    const std::vector<std::filesystem::path> source_paths = resolve_startup_source_paths(options);
+    if (source_paths.empty()) {
+        debug_log(options, "startup indexing disabled");
+        return RagStatePtr(nullptr, destroy_rag_state);
+    }
+
     RagStatePtr rag_state = create_empty_rag_state(options);
-    index_rag_source(*rag_state, options, std::filesystem::path(options.rag_documents_path));
+    index_rag_sources(*rag_state, options, source_paths, {});
     return rag_state;
 }
 
@@ -426,7 +713,62 @@ void learn_rag_sources(
         rag_state = create_empty_rag_state(options);
     }
 
+    erase_rag_sources(*rag_state, resolve_source_keys(source_paths));
+
     index_rag_sources(*rag_state, options, source_paths, progress_callback);
+}
+
+void replace_rag_sources(
+    RagStatePtr & rag_state,
+    const Options & options,
+    const std::vector<std::filesystem::path> & source_paths,
+    const RagProgressCallback & progress_callback) {
+    if (source_paths.empty()) {
+        throw std::runtime_error("/learn requires a file or directory path");
+    }
+
+    if (!rag_state) {
+        rag_state = create_empty_rag_state(options);
+    }
+
+    rag_state->chunks.clear();
+    index_rag_sources(*rag_state, options, source_paths, progress_callback);
+}
+
+void forget_rag_sources(
+    RagStatePtr & rag_state,
+    const std::vector<std::filesystem::path> & source_paths) {
+    if (!rag_state || source_paths.empty()) {
+        return;
+    }
+
+    erase_rag_sources(*rag_state, resolve_source_keys(source_paths));
+}
+
+void clear_rag_sources(RagStatePtr & rag_state) {
+    if (!rag_state) {
+        return;
+    }
+
+    rag_state->chunks.clear();
+}
+
+size_t rag_chunk_count(const RagState * rag_state) {
+    return rag_state == nullptr ? 0 : rag_state->chunks.size();
+}
+
+size_t rag_chunk_count_for_source(const RagState * rag_state, const std::filesystem::path & source_path) {
+    if (rag_state == nullptr) {
+        return 0;
+    }
+
+    const std::string normalized_source = display_source_path(source_path);
+    return static_cast<size_t>(std::count_if(
+        rag_state->chunks.begin(),
+        rag_state->chunks.end(),
+        [&](const IndexedChunk & chunk) {
+            return chunk.source == normalized_source;
+        }));
 }
 
 bool should_use_rag_for_input(const std::string & user_input) {

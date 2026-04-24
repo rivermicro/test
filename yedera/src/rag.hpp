@@ -26,6 +26,17 @@ void learn_rag_sources(
     const Options & options,
     const std::vector<std::filesystem::path> & source_paths,
     const RagProgressCallback & progress_callback = {});
+void replace_rag_sources(
+    RagStatePtr & rag_state,
+    const Options & options,
+    const std::vector<std::filesystem::path> & source_paths,
+    const RagProgressCallback & progress_callback = {});
+void forget_rag_sources(
+    RagStatePtr & rag_state,
+    const std::vector<std::filesystem::path> & source_paths);
+void clear_rag_sources(RagStatePtr & rag_state);
+size_t rag_chunk_count(const RagState * rag_state);
+size_t rag_chunk_count_for_source(const RagState * rag_state, const std::filesystem::path & source_path);
 bool should_use_rag_for_input(const std::string & user_input);
 std::string format_rag_prompt(const std::string & retrieved_context, const std::string & user_input);
 std::string augment_prompt_with_rag(RagState * rag_state, const std::string & user_input);

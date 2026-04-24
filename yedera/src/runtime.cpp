@@ -3,14 +3,16 @@
 #include "debug.hpp"
 #include "llama.h"
 #include "rag.hpp"
+#include "token_list.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
-#include <glob.h>
+#include <fnmatch.h>
 #include <iostream>
 #include <memory>
 #include <poll.h>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <termios.h>
@@ -157,6 +159,90 @@ bool contains_wildcard(const std::string & path_pattern) {
     return path_pattern.find_first_of("*?[") != std::string::npos;
 }
 
+std::filesystem::path wildcard_search_root(const std::filesystem::path & pattern_path) {
+    std::filesystem::path search_root;
+    for (const auto & component : pattern_path) {
+        if (contains_wildcard(component.string())) {
+            break;
+        }
+
+        search_root /= component;
+    }
+
+    if (!search_root.empty()) {
+        return search_root.lexically_normal();
+    }
+
+    std::error_code error;
+    const std::filesystem::path current_directory = std::filesystem::current_path(error);
+    return error ? std::filesystem::path(".") : current_directory.lexically_normal();
+}
+
+bool has_matched_directory_ancestor(const std::filesystem::path & path, const std::set<std::string> & matched_directory_keys) {
+    std::filesystem::path parent = path.parent_path();
+    while (!parent.empty()) {
+        if (matched_directory_keys.find(parent.lexically_normal().string()) != matched_directory_keys.end()) {
+            return true;
+        }
+
+        const std::filesystem::path next_parent = parent.parent_path();
+        if (next_parent == parent) {
+            break;
+        }
+        parent = next_parent;
+    }
+
+    return false;
+}
+
+std::vector<std::filesystem::path> expand_recursive_wildcard_paths(const std::filesystem::path & pattern_path) {
+    std::vector<std::filesystem::path> matches;
+
+    std::error_code error;
+    const std::filesystem::path search_root = wildcard_search_root(pattern_path);
+    if (!std::filesystem::exists(search_root, error) || error) {
+        return matches;
+    }
+
+    const std::string pattern = pattern_path.lexically_normal().string();
+    std::filesystem::recursive_directory_iterator end;
+    for (std::filesystem::recursive_directory_iterator iterator(
+             search_root,
+             std::filesystem::directory_options::skip_permission_denied,
+             error);
+         !error && iterator != end;
+         iterator.increment(error)) {
+        const std::filesystem::path candidate = iterator->path().lexically_normal();
+        if (fnmatch(pattern.c_str(), candidate.string().c_str(), 0) == 0) {
+            matches.push_back(candidate);
+        }
+    }
+
+    if (error) {
+        return {};
+    }
+
+    std::sort(matches.begin(), matches.end());
+    matches.erase(std::unique(matches.begin(), matches.end()), matches.end());
+
+    std::vector<std::filesystem::path> filtered_matches;
+    std::set<std::string> matched_directory_keys;
+    for (const auto & match : matches) {
+        if (has_matched_directory_ancestor(match, matched_directory_keys)) {
+            continue;
+        }
+
+        filtered_matches.push_back(match);
+
+        std::error_code directory_error;
+        if (std::filesystem::is_directory(match, directory_error) && !directory_error) {
+            matched_directory_keys.insert(match.string());
+        }
+    }
+
+    return filtered_matches;
+}
+
 std::filesystem::path resolve_learn_entry_path(
     const Options & options,
     const std::string & source_path,
@@ -169,7 +255,7 @@ std::filesystem::path resolve_learn_entry_path(
     return (std::filesystem::path(options.rag_documents_path) / entered_path).lexically_normal();
 }
 
-std::vector<std::filesystem::path> expand_learn_entry_paths(
+std::vector<std::filesystem::path> expand_single_learn_entry_paths(
     const Options & options,
     const std::string & source_path,
     bool relative_to_rag_documents_path) {
@@ -185,22 +271,34 @@ std::vector<std::filesystem::path> expand_learn_entry_paths(
         return {resolved_path};
     }
 
-    glob_t glob_result{};
-    const int result = glob(pattern.c_str(), 0, nullptr, &glob_result);
-    std::vector<std::filesystem::path> paths;
-    if (result == 0) {
-        paths.reserve(glob_result.gl_pathc);
-        for (size_t index = 0; index < glob_result.gl_pathc; ++index) {
-            paths.emplace_back(std::filesystem::path(glob_result.gl_pathv[index]).lexically_normal());
-        }
-    }
-    globfree(&glob_result);
-
+    std::vector<std::filesystem::path> paths = expand_recursive_wildcard_paths(resolved_path);
     if (paths.empty()) {
         return {resolved_path};
     }
 
-    std::sort(paths.begin(), paths.end());
+    return paths;
+}
+
+std::vector<std::filesystem::path> expand_learn_entry_paths(
+    const Options & options,
+    const std::string & source_path,
+    bool relative_to_rag_documents_path) {
+    const std::vector<std::string> entries = parse_token_list(trim(source_path), "learn path");
+    if (entries.empty()) {
+        return {};
+    }
+
+    std::vector<std::filesystem::path> paths;
+    std::set<std::string> seen_paths;
+    for (const std::string & entry : entries) {
+        for (const auto & expanded_path : expand_single_learn_entry_paths(options, entry, relative_to_rag_documents_path)) {
+            const std::filesystem::path normalized_path = expanded_path.lexically_normal();
+            if (seen_paths.insert(normalized_path.string()).second) {
+                paths.push_back(normalized_path);
+            }
+        }
+    }
+
     return paths;
 }
 
@@ -530,9 +628,33 @@ void run_inference(const Options & options) {
 
             if (prompt_mode == PromptMode::LearnFile) {
                 try {
+                    const std::string trimmed_input = trim(user_input);
+                    if (trimmed_input == "-") {
+                        clear_rag_sources(rag_state);
+                        std::cout << "[rag] forgot all\n";
+                        prompt_mode = PromptMode::Chat;
+                        continue;
+                    }
+
+                    if (starts_with(trimmed_input, "-")) {
+                        const std::string forget_path = trim(trimmed_input.substr(1));
+                        const std::vector<std::filesystem::path> source_paths =
+                            expand_learn_entry_paths(options, forget_path, true);
+                        forget_rag_sources(rag_state, source_paths);
+                        for (const auto & source_path : source_paths) {
+                            std::cout << "[rag] forgot " << display_source_path(source_path.string()) << '\n';
+                        }
+                        prompt_mode = PromptMode::Chat;
+                        continue;
+                    }
+
                     const std::vector<std::filesystem::path> source_paths =
                         expand_learn_entry_paths(options, user_input, true);
-                    learn_rag_sources(rag_state, options, source_paths, print_rag_tuning_progress);
+                    if (trimmed_input == "*") {
+                        replace_rag_sources(rag_state, options, source_paths, print_rag_tuning_progress);
+                    } else {
+                        learn_rag_sources(rag_state, options, source_paths, print_rag_tuning_progress);
+                    }
                     for (const auto & source_path : source_paths) {
                         std::cout << "[rag] learned " << display_source_path(source_path.string()) << '\n';
                     }

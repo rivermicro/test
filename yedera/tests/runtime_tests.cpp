@@ -74,6 +74,14 @@ void write_file(const std::filesystem::path & path, const std::string & content)
     output << content;
 }
 
+void write_binary_file(const std::filesystem::path & path, const std::string & content) {
+    std::ofstream output(path, std::ios::binary);
+    if (!output.is_open()) {
+        throw std::runtime_error("failed to write binary test file: " + path.string());
+    }
+    output.write(content.data(), static_cast<std::streamsize>(content.size()));
+}
+
 std::string shell_quote(std::string_view value) {
     std::string quoted = "'";
     for (const char ch : value) {
@@ -85,6 +93,18 @@ std::string shell_quote(std::string_view value) {
     }
     quoted += "'";
     return quoted;
+}
+
+std::string escape_pdf_text(std::string_view text) {
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (const char ch : text) {
+        if (ch == '\\' || ch == '(' || ch == ')') {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(ch);
+    }
+    return escaped;
 }
 
 std::string run_command(const std::string & command) {
@@ -107,6 +127,63 @@ std::string run_command(const std::string & command) {
     }
 
     return output;
+}
+
+void write_pdf_file(const std::filesystem::path & path, const std::vector<std::string> & lines) {
+    std::string content_stream = "BT\n/F1 12 Tf\n72 720 Td\n";
+    for (size_t index = 0; index < lines.size(); ++index) {
+        if (index > 0) {
+            content_stream += "0 -16 Td\n";
+        }
+        content_stream += "(" + escape_pdf_text(lines[index]) + ") Tj\n";
+    }
+    content_stream += "ET\n";
+
+    const std::vector<std::string> objects = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        "<< /Length " + std::to_string(content_stream.size()) + " >>\nstream\n" + content_stream + "endstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    };
+
+    std::string pdf = "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+    offsets.reserve(objects.size() + 1);
+    offsets.push_back(0);
+    for (size_t index = 0; index < objects.size(); ++index) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(index + 1) + " 0 obj\n" + objects[index] + "\nendobj\n";
+    }
+
+    const size_t xref_offset = pdf.size();
+    pdf += "xref\n0 " + std::to_string(objects.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t index = 1; index < offsets.size(); ++index) {
+        char offset_buffer[32];
+        std::snprintf(offset_buffer, sizeof(offset_buffer), "%010zu 00000 n \n", offsets[index]);
+        pdf += offset_buffer;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(objects.size() + 1) + " /Root 1 0 R >>\n";
+    pdf += "startxref\n" + std::to_string(xref_offset) + "\n%%EOF\n";
+
+    write_binary_file(path, pdf);
+}
+
+void write_docx_file(const std::filesystem::path & path, const std::string & title, const std::string & body) {
+    const std::filesystem::path source_path = path.parent_path() / (path.stem().string() + ".source.md");
+    write_file(source_path, "# " + title + "\n\n" + body + "\n");
+    run_command("pandoc -s " + shell_quote(source_path.string()) + " -o " + shell_quote(path.string()));
+    std::error_code error;
+    std::filesystem::remove(source_path, error);
+}
+
+void write_doc_file(const std::filesystem::path & path, const std::string & title, const std::string & body) {
+    const std::filesystem::path source_path = path.parent_path() / (path.stem().string() + ".source.md");
+    write_file(source_path, "# " + title + "\n\n" + body + "\n");
+    run_command("pandoc -s -t rtf " + shell_quote(source_path.string()) + " -o " + shell_quote(path.string()));
+    std::error_code error;
+    std::filesystem::remove(source_path, error);
 }
 
 #if defined(__linux__)
@@ -453,10 +530,12 @@ void test_rag_retrieval_reports_indexed_documents() {
 
     const TempDirectory temp_dir;
     const std::filesystem::path rag_dir = temp_dir.path / "rag";
+    const std::filesystem::path nested_dir = rag_dir / "nested";
     const std::filesystem::path config_path = temp_dir.path / "yedera.conf";
-    std::filesystem::create_directories(rag_dir);
+    std::filesystem::create_directories(nested_dir);
     write_file(rag_dir / "note.md", "garage retrieval keyword\n\nThe answer lives in the local note file.\n");
     write_file(rag_dir / "odd.txt", "the obsidian teacup is catalogued under shelf delta\n");
+    write_file(nested_dir / "deep.md", "nested startup keyword\n\nThis nested file should be indexed recursively at startup.\n");
     write_file(
         config_path,
         "prompt = \"You are a test assistant.\"\n"
@@ -480,8 +559,60 @@ void test_rag_retrieval_reports_indexed_documents() {
     expect_contains(output, "[debug] RAG: learning content from files", "RAG debug output should announce file learning");
     expect_contains(output, "[rag] " + (rag_dir / "note.md").lexically_normal().string(), "RAG debug output should list learned markdown files");
     expect_contains(output, "[rag] " + (rag_dir / "odd.txt").lexically_normal().string(), "RAG debug output should list learned text files");
+    expect_contains(output, "[rag] " + (nested_dir / "deep.md").lexically_normal().string(), "startup RAG indexing should recurse into nested directories");
     expect_contains(output, "[debug] RAG: indexed ", "RAG should index the configured documents");
     expect_contains(output, "[retrieved ", "RAG should report the retrieved document chunks");
+}
+
+void test_rag_retrieval_extracts_pdf_doc_and_docx_documents() {
+    const std::filesystem::path model_path = binary_path().parent_path() / "model" / "llama3.2-1b.gguf";
+    expect_true(std::filesystem::exists(model_path), "runtime smoke test model is missing");
+
+    const TempDirectory temp_dir;
+    const std::filesystem::path rag_dir = temp_dir.path / "rag";
+    const std::filesystem::path pdf_file = rag_dir / "manual.pdf";
+    const std::filesystem::path doc_file = rag_dir / "notes.doc";
+    const std::filesystem::path docx_file = rag_dir / "summary.docx";
+    const std::filesystem::path config_path = temp_dir.path / "yedera.conf";
+    std::filesystem::create_directories(rag_dir);
+
+    write_pdf_file(pdf_file, {"PDF sentinel location: basil tunnel crate 77."});
+    write_doc_file(doc_file, "DOC Sentinel", "DOC sentinel latch code: cobalt-34.");
+    write_docx_file(docx_file, "DOCX Sentinel", "DOCX sentinel corridor: copper tunnel.");
+
+    write_file(
+        config_path,
+        "prompt = \"You are a test assistant.\"\n"
+        "model_path = \"" + model_path.string() + "\"\n"
+        "model_embeddings = \"" + model_path.string() + "\"\n"
+        "rag_documents_path = \"" + rag_dir.string() + "\"\n"
+        "n_gpu_layers = 0\n"
+        "debug = true\n"
+        "verbose = false\n");
+
+    auto run_prompt = [&](const std::string & prompt) {
+        return normalize_terminal_output(
+            run_command(
+                shell_quote(binary_path().string()) +
+                " --config " + shell_quote(config_path.string()) +
+                " --prompt " + shell_quote(prompt) +
+                " --n-predict 48 --temperature 0 --top-p 1 --min-p 0 --seed 1 2>&1"));
+    };
+
+    const std::string pdf_output = run_prompt("what is the PDF sentinel location?");
+    expect_contains(pdf_output, "[rag] " + pdf_file.lexically_normal().string(), "startup indexing should learn the PDF file");
+    expect_contains(pdf_output, "[rag] " + doc_file.lexically_normal().string(), "startup indexing should learn the DOC file");
+    expect_contains(pdf_output, "[rag] " + docx_file.lexically_normal().string(), "startup indexing should learn the DOCX file");
+    expect_contains(pdf_output, "[retrieved ", "PDF retrieval should use RAG chunks");
+    expect_contains(pdf_output, "basil tunnel crate 77", "PDF retrieval should surface the extracted PDF fact");
+
+    const std::string doc_output = run_prompt("what is the DOC sentinel latch code?");
+    expect_contains(doc_output, "[retrieved ", "DOC retrieval should use RAG chunks");
+    expect_contains(doc_output, "cobalt-34", "DOC retrieval should surface the extracted DOC fact");
+
+    const std::string docx_output = run_prompt("what is the DOCX sentinel corridor?");
+    expect_contains(docx_output, "[retrieved ", "DOCX retrieval should use RAG chunks");
+    expect_contains(docx_output, "copper tunnel", "DOCX retrieval should surface the extracted DOCX fact");
 }
 
 void test_interactive_learn_command_does_not_conflict_with_prompt() {
@@ -588,6 +719,129 @@ void test_escape_file_entry_resolves_paths_and_returns_to_chat_prompt() {
 #endif
 }
 
+void test_escape_star_and_forget_commands_manage_rag_state() {
+#if !defined(__linux__)
+    return;
+#else
+    const std::filesystem::path model_path = binary_path().parent_path() / "model" / "llama3.2-1b.gguf";
+    expect_true(std::filesystem::exists(model_path), "runtime smoke test model is missing");
+
+    const TempDirectory temp_dir;
+    const std::filesystem::path rag_dir = temp_dir.path / "rag";
+    std::filesystem::create_directories(rag_dir);
+    const std::filesystem::path file_a = rag_dir / "all-a.md";
+    const std::filesystem::path file_b = rag_dir / "all-b.md";
+    const std::filesystem::path config_path = temp_dir.path / "yedera.conf";
+    write_file(file_a, "star forget alpha keyword\n\nThis file exists for ESC star relearn and forget testing.\n");
+    write_file(file_b, "star forget beta keyword\n\nThis file exists for ESC star relearn and forget testing.\n");
+    write_file(
+        config_path,
+        "prompt = \"You are a test assistant.\"\n"
+        "model_path = \"" + model_path.string() + "\"\n"
+        "model_embeddings = \"" + model_path.string() + "\"\n"
+        "rag_documents_path = \"" + rag_dir.string() + "\"\n"
+        "n_gpu_layers = 0\n"
+        "debug = true\n"
+        "verbose = false\n");
+
+    const std::string raw_output = run_command_in_pty(
+        {
+            binary_path().string(),
+            "--config",
+            config_path.string(),
+            "--interactive",
+            "--n-predict",
+            "1",
+            "--temperature",
+            "0",
+            "--top-p",
+            "1",
+            "--min-p",
+            "0",
+            "--seed",
+            "1",
+        },
+        {
+            {"\x1b", "\r\x1b[2K: "},
+            {"*\n", "[rag] learned " + file_b.lexically_normal().string()},
+            {"\x1b", "\r\x1b[2K: "},
+            {"-all-a.md\n", "[rag] forgot " + file_a.lexically_normal().string()},
+            {"\x1b", "\r\x1b[2K: "},
+            {"-\n", "[rag] forgot all"},
+            {"star forget alpha keyword\n", "\n> "},
+            {"\n", ""},
+        });
+    const std::string output = normalize_terminal_output(raw_output);
+
+    expect_contains(output, file_a.lexically_normal().string() + " <50% rag tuning>", "ESC star should re-learn the first file in the configured rag folder");
+    expect_contains(output, file_b.lexically_normal().string() + " <100% rag tuning>", "ESC star should re-learn all files in the configured rag folder");
+    expect_contains(output, "[rag] learned " + file_a.lexically_normal().string(), "ESC star should acknowledge the first relearned file");
+    expect_contains(output, "[rag] learned " + file_b.lexically_normal().string(), "ESC star should acknowledge the second relearned file");
+    expect_contains(output, "[rag] forgot " + file_a.lexically_normal().string(), "ESC -<file> should forget the requested file");
+    expect_contains(output, "[rag] forgot all", "ESC - should clear all learned RAG content");
+    expect_not_contains(output, "[retrieved ", "after ESC - clears all RAG content, a chat prompt should no longer retrieve RAG chunks");
+#endif
+}
+
+void test_escape_wildcard_entries_match_nested_files_recursively() {
+#if !defined(__linux__)
+    return;
+#else
+    const std::filesystem::path model_path = binary_path().parent_path() / "model" / "llama3.2-1b.gguf";
+    expect_true(std::filesystem::exists(model_path), "runtime smoke test model is missing");
+
+    const TempDirectory temp_dir;
+    const std::filesystem::path rag_dir = temp_dir.path / "rag";
+    const std::filesystem::path nested_dir = rag_dir / "nested";
+    std::filesystem::create_directories(nested_dir);
+    const std::filesystem::path root_file = rag_dir / "root-note.md";
+    const std::filesystem::path nested_file = nested_dir / "deep-note.md";
+    const std::filesystem::path config_path = temp_dir.path / "yedera.conf";
+    write_file(root_file, "root recursive wildcard keyword\n\nThis top-level file is learned from the ESC prompt mode.\n");
+    write_file(nested_file, "nested recursive wildcard keyword\n\nThis nested file should be learned through recursive wildcard matching.\n");
+    write_file(
+        config_path,
+        "prompt = \"You are a test assistant.\"\n"
+        "model_path = \"" + model_path.string() + "\"\n"
+        "model_embeddings = \"" + model_path.string() + "\"\n"
+        "rag_documents_path = \"" + rag_dir.string() + "\"\n"
+        "n_gpu_layers = 0\n"
+        "debug = true\n"
+        "verbose = false\n");
+
+    const std::string raw_output = run_command_in_pty(
+        {
+            binary_path().string(),
+            "--config",
+            config_path.string(),
+            "--interactive",
+            "--n-predict",
+            "1",
+            "--temperature",
+            "0",
+            "--top-p",
+            "1",
+            "--min-p",
+            "0",
+            "--seed",
+            "1",
+        },
+        {
+            {"\x1b", "\r\x1b[2K: "},
+            {"*.md\n", "[rag] learned " + nested_file.lexically_normal().string()},
+            {"nested recursive wildcard keyword\n", "[retrieved "},
+            {"\n", ""},
+        });
+    const std::string output = normalize_terminal_output(raw_output);
+
+    expect_contains(output, root_file.lexically_normal().string() + " <50% rag tuning>", "recursive wildcard matching should include top-level markdown files");
+    expect_contains(output, nested_file.lexically_normal().string() + " <100% rag tuning>", "recursive wildcard matching should include nested markdown files");
+    expect_contains(output, "[rag] learned " + root_file.lexically_normal().string(), "recursive wildcard matching should acknowledge the top-level file");
+    expect_contains(output, "[rag] learned " + nested_file.lexically_normal().string(), "recursive wildcard matching should acknowledge the nested file");
+    expect_contains(output, "[retrieved ", "recursive wildcard learning should still feed the normal RAG retrieval path");
+#endif
+}
+
 void test_chat_prompt_arrow_keys_navigate_history() {
 #if !defined(__linux__)
     return;
@@ -644,8 +898,11 @@ int main() {
         test_missing_config_reports_error();
         test_debug_output_stays_filtered();
         test_rag_retrieval_reports_indexed_documents();
+        test_rag_retrieval_extracts_pdf_doc_and_docx_documents();
         test_interactive_learn_command_does_not_conflict_with_prompt();
         test_escape_file_entry_resolves_paths_and_returns_to_chat_prompt();
+        test_escape_star_and_forget_commands_manage_rag_state();
+        test_escape_wildcard_entries_match_nested_files_recursively();
         test_chat_prompt_arrow_keys_navigate_history();
         std::cout << "runtime tests passed\n";
         return 0;

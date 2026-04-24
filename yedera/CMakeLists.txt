@@ -72,28 +72,87 @@ install(TARGETS yedera RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES yedera.conf DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if (BUILD_TESTING)
-    add_executable(yedera-config-tests
-        tests/cli_tests.cpp
-        src/cli.cpp
-        src/rag.cpp
-        src/pull.cpp
-        src/paths.cpp)
-    target_link_libraries(yedera-config-tests PRIVATE llama Threads::Threads cpp-httplib)
-    target_compile_features(yedera-config-tests PRIVATE cxx_std_17)
-    target_include_directories(yedera-config-tests PRIVATE
-        src
-        ${YEDERA_LLAMA_CPP_DIR}/common
-        ${YEDERA_LLAMA_CPP_DIR}/vendor)
-    add_test(NAME yedera-config-tests COMMAND yedera-config-tests)
+    add_test(
+        NAME yedera-cli-positional-prompt-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=positional_prompt
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
 
-    add_executable(yedera-runtime-tests
-        tests/runtime_tests.cpp)
-    target_compile_features(yedera-runtime-tests PRIVATE cxx_std_17)
-    target_compile_definitions(yedera-runtime-tests PRIVATE
-        YEDERA_BINARY_PATH="$<TARGET_FILE:yedera>")
-    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_link_libraries(yedera-runtime-tests PRIVATE util)
-    endif()
-    add_dependencies(yedera-runtime-tests yedera)
-    add_test(NAME yedera-runtime-tests COMMAND yedera-runtime-tests)
+    add_test(
+        NAME yedera-cli-no-prompt-chat-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=no_prompt_chat
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
+        NAME yedera-cli-current-dir-config-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=current_dir_config
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
+        NAME yedera-cli-home-config-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=home_config
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
+        NAME yedera-cli-missing-config-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=missing_config
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
+        NAME yedera-cli-rag-startup-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=rag_startup
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
+        NAME yedera-cli-startup-rag-disabled-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=startup_rag_disabled
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
+        NAME yedera-cli-index-at-startup-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=index_at_startup
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
+        NAME yedera-cli-learn-multi-entry-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=learn_multi_entry_syntax
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    set_tests_properties(
+        yedera-cli-positional-prompt-test
+        yedera-cli-no-prompt-chat-test
+        yedera-cli-current-dir-config-test
+        yedera-cli-home-config-test
+        yedera-cli-missing-config-test
+        yedera-cli-rag-startup-test
+        yedera-cli-startup-rag-disabled-test
+        yedera-cli-index-at-startup-test
+        yedera-cli-learn-multi-entry-test
+        PROPERTIES TIMEOUT 180)
 endif()

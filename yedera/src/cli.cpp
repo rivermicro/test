@@ -3,7 +3,10 @@
 #include "ggml-backend.h"
 #include "llama.h"
 #include "paths.hpp"
+#include "token_list.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -85,6 +88,33 @@ std::string trim(std::string value) {
     }
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1);
+}
+
+std::string to_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+std::vector<std::string> parse_index_at_startup_value(const std::string & raw_value) {
+    std::vector<std::string> tokens = parse_token_list(raw_value, "index_at_startup");
+    if (tokens.empty()) {
+        return {};
+    }
+
+    if (tokens.size() == 1) {
+        const std::string lowered = to_lower(tokens.front());
+        if (lowered == "false" || lowered == "no" || lowered == "off" || lowered == "0") {
+            return {};
+        }
+
+        if (lowered == "true" || lowered == "yes" || lowered == "on" || lowered == "1") {
+            return {"*"};
+        }
+    }
+
+    return tokens;
 }
 
 std::string resolve_config_relative_path(const std::filesystem::path & config_path, const std::string & value) {
@@ -197,7 +227,8 @@ OptionOverrides load_config_file(const std::filesystem::path & config_path, bool
         }
 
         const std::string key = trim(trimmed.substr(0, separator));
-        const std::string value = strip_wrapping_quotes(trim(trimmed.substr(separator + 1)));
+        const std::string raw_value = trim(trimmed.substr(separator + 1));
+        const std::string value = strip_wrapping_quotes(raw_value);
 
         try {
             if (key == "model_path") {
@@ -206,6 +237,8 @@ OptionOverrides load_config_file(const std::filesystem::path & config_path, bool
                 overrides.model_embeddings = value;
             } else if (key == "rag_documents_path") {
                 overrides.rag_documents_path = value;
+            } else if (key == "index_at_startup") {
+                overrides.index_at_startup = parse_index_at_startup_value(raw_value);
             } else if (key == "prompt") {
                 overrides.system_prompt = value;
             } else if (key == "user_prompt") {
@@ -254,8 +287,8 @@ void print_usage(const char * program_name) {
         << "Options:\n"
         << "  --config PATH             Config file path (default: ./yedera.conf, then ~/.yedera/yedera.conf)\n"
         << "  -m, --model-path PATH      Path to a local GGUF model file\n"
-        << "  -p, --prompt TEXT          One-shot user prompt\n"
-        << "  -i, --interactive          Start an interactive chat session\n"
+        << "  -p, --prompt TEXT          One-shot user prompt (same as passing [prompt] positionally)\n"
+        << "  -i, --interactive          Force interactive chat mode even when a prompt is configured\n"
         << "  -s, --system-prompt TEXT   Assistant system prompt\n"
         << "  -c, --ctx-size N           Context size (default: 2048)\n"
         << "  -n, --n-predict N          Max generated tokens per response (default: 256)\n"
@@ -266,11 +299,19 @@ void print_usage(const char * program_name) {
         << "  -ngl, --n-gpu-layers N     GPU offload layers (default: auto; all layers on NVIDIA when available)\n"
         << "  -v, --verbose              Keep llama.cpp logging enabled\n"
         << "  -h, --help                 Show this help\n\n"
+        << "Behavior:\n"
+        << "  [prompt]                  Run one inference and exit\n"
+        << "  no prompt                 Enter chat mode\n\n"
         << "Interactive chat commands:\n"
-        << "  /learn PATH               Learn a file or directory for the current session\n"
+        << "  /learn PATHS              Learn one or more files/directories for the current session\n"
         << "  //TEXT                    Send a literal prompt that starts with /\n"
         << "  ESC on an empty line      Toggle between `> ` chat mode and `: ` file-learn mode\n"
-        << "                            In file-learn mode, relative paths and wildcards resolve under rag_documents_path\n";
+        << "                            In file-learn mode, relative paths and wildcards resolve under rag_documents_path\n"
+        << "                            Quoted entries and comma-separated lists are accepted in /learn and `: ` mode\n"
+        << "  : PATHS                   Learn or re-learn matching files, replacing prior chunks for the same file\n"
+        << "  : *                       Rebuild RAG state from all files under rag_documents_path\n"
+        << "  : -PATH                   Forget matching learned files from the current session\n"
+        << "  : -                       Forget all learned RAG content for the current session\n";
 }
 
 OptionOverrides parse_args(int argc, char ** argv) {
@@ -343,6 +384,7 @@ Options resolve_options(const OptionOverrides & cli_overrides) {
     apply_override(options.model_path, config_overrides.model_path);
     apply_override(options.model_embeddings, config_overrides.model_embeddings);
     apply_override(options.rag_documents_path, config_overrides.rag_documents_path);
+    apply_override(options.index_at_startup, config_overrides.index_at_startup);
     apply_override(options.prompt, config_overrides.user_prompt);
     apply_override(options.system_prompt, config_overrides.system_prompt);
     apply_override(options.n_ctx, config_overrides.n_ctx);
@@ -369,6 +411,7 @@ Options resolve_options(const OptionOverrides & cli_overrides) {
     apply_override(options.model_path, cli_overrides.model_path);
     apply_override(options.model_embeddings, cli_overrides.model_embeddings);
     apply_override(options.rag_documents_path, cli_overrides.rag_documents_path);
+    apply_override(options.index_at_startup, cli_overrides.index_at_startup);
     apply_override(options.prompt, cli_overrides.user_prompt);
     apply_override(options.system_prompt, cli_overrides.system_prompt);
     apply_override(options.n_ctx, cli_overrides.n_ctx);
