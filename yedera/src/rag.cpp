@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -46,6 +47,22 @@ std::string to_lower(std::string value) {
         return static_cast<char>(std::tolower(character));
     });
     return value;
+}
+
+bool contains_text(const std::string & value, const std::string & needle) {
+    return value.find(needle) != std::string::npos;
+}
+
+bool contains_digit(const std::string & value) {
+    return std::any_of(value.begin(), value.end(), [](unsigned char character) {
+        return std::isdigit(character);
+    });
+}
+
+bool looks_like_lookup_request(const std::string & input) {
+    return contains_digit(input) || contains_text(input, "item") || contains_text(input, "price") ||
+           contains_text(input, "buy it now") || contains_text(input, "sku") || contains_text(input, "record") ||
+           contains_text(input, "lookup") || contains_text(input, "find ");
 }
 
 bool is_supported_document_file(const std::filesystem::path & path) {
@@ -129,17 +146,6 @@ std::filesystem::path normalize_source_path(const std::filesystem::path & file_p
     }
 
     return file_path.lexically_normal();
-}
-
-std::string join_strings(const std::vector<std::string> & values, const std::string & separator) {
-    std::string joined;
-    for (size_t index = 0; index < values.size(); ++index) {
-        if (index > 0) {
-            joined += separator;
-        }
-        joined += values[index];
-    }
-    return joined;
 }
 
 std::vector<float> normalize_embedding(const float * embedding, int embedding_size) {
@@ -307,19 +313,39 @@ RagStatePtr create_empty_rag_state(const Options & options) {
     return RagStatePtr(new RagState(options, require_embeddings_model_path(options)), destroy_rag_state);
 }
 
-void index_rag_source(RagState & rag_state, const Options & options, const std::filesystem::path & source_path) {
-    if (!std::filesystem::exists(source_path)) {
-        throw std::runtime_error("RAG source does not exist: " + source_path.string());
+void index_rag_sources(
+    RagState & rag_state,
+    const Options & options,
+    const std::vector<std::filesystem::path> & source_paths,
+    const RagProgressCallback & progress_callback) {
+    if (source_paths.empty()) {
+        throw std::runtime_error("RAG source does not exist");
     }
 
-    debug_log(options, "indexing documents from " + display_source_path(source_path));
-    const std::vector<std::filesystem::path> document_files = collect_document_files(source_path);
+    std::vector<std::filesystem::path> document_files;
+    std::set<std::string> document_file_keys;
+    for (const auto & source_path : source_paths) {
+        if (!std::filesystem::exists(source_path)) {
+            throw std::runtime_error("RAG source does not exist: " + source_path.string());
+        }
+
+        debug_log(options, "indexing documents from " + display_source_path(source_path));
+        for (const auto & document_file : collect_document_files(source_path)) {
+            const std::filesystem::path normalized_file = normalize_source_path(document_file);
+            if (document_file_keys.insert(normalized_file.string()).second) {
+                document_files.push_back(normalized_file);
+            }
+        }
+    }
+
+    std::sort(document_files.begin(), document_files.end());
     if (document_files.empty()) {
-        throw std::runtime_error("no readable RAG documents found in: " + source_path.string());
+        throw std::runtime_error("no readable RAG documents found in: " + source_paths.front().string());
     }
 
     debug_log(options, "learning content from files");
 
+    size_t processed_documents = 0;
     size_t indexed_documents = 0;
     size_t indexed_chunks = 0;
     for (const auto & document_file : document_files) {
@@ -328,6 +354,10 @@ void index_rag_source(RagState & rag_state, const Options & options, const std::
         const std::string source = display_source_path(document_file);
         debug_file_log(options, source);
         if (document_chunks.empty()) {
+            ++processed_documents;
+            if (progress_callback) {
+                progress_callback(source, processed_documents, document_files.size());
+            }
             continue;
         }
 
@@ -336,16 +366,29 @@ void index_rag_source(RagState & rag_state, const Options & options, const std::
         for (const std::string & chunk_text : document_chunks) {
             rag_state.chunks.push_back({source, chunk_text, rag_state.engine.embed(chunk_text)});
         }
+
+        ++processed_documents;
+        if (progress_callback) {
+            progress_callback(source, processed_documents, document_files.size());
+        }
     }
 
     if (indexed_chunks == 0) {
-        throw std::runtime_error("no non-empty RAG document chunks found in: " + source_path.string());
+        throw std::runtime_error("no non-empty RAG document chunks found in: " + source_paths.front().string());
     }
 
     debug_log(
         options,
         "indexed " + std::to_string(indexed_chunks) +
             " chunks from " + std::to_string(indexed_documents) + " documents");
+}
+
+void index_rag_source(
+    RagState & rag_state,
+    const Options & options,
+    const std::filesystem::path & source_path,
+    const RagProgressCallback & progress_callback = {}) {
+    index_rag_sources(rag_state, options, {source_path}, progress_callback);
 }
 
 RagStatePtr create_rag_state(const Options & options) {
@@ -358,8 +401,24 @@ RagStatePtr create_rag_state(const Options & options) {
     return rag_state;
 }
 
-void learn_rag_source(RagStatePtr & rag_state, const Options & options, const std::string & source_path) {
+void learn_rag_source(
+    RagStatePtr & rag_state,
+    const Options & options,
+    const std::string & source_path,
+    const RagProgressCallback & progress_callback) {
     if (trim(source_path).empty()) {
+        throw std::runtime_error("/learn requires a file or directory path");
+    }
+
+    learn_rag_sources(rag_state, options, {std::filesystem::path(source_path)}, progress_callback);
+}
+
+void learn_rag_sources(
+    RagStatePtr & rag_state,
+    const Options & options,
+    const std::vector<std::filesystem::path> & source_paths,
+    const RagProgressCallback & progress_callback) {
+    if (source_paths.empty()) {
         throw std::runtime_error("/learn requires a file or directory path");
     }
 
@@ -367,11 +426,47 @@ void learn_rag_source(RagStatePtr & rag_state, const Options & options, const st
         rag_state = create_empty_rag_state(options);
     }
 
-    index_rag_source(*rag_state, options, std::filesystem::path(source_path));
+    index_rag_sources(*rag_state, options, source_paths, progress_callback);
+}
+
+bool should_use_rag_for_input(const std::string & user_input) {
+    const std::string input = to_lower(trim(user_input));
+    if (input.empty()) {
+        return false;
+    }
+
+    if (looks_like_lookup_request(input)) {
+        return true;
+    }
+
+    if (contains_text(input, "my name") || contains_text(input, "who am i") || contains_text(input, "who i am")) {
+        return false;
+    }
+
+    if (contains_text(input, "what did i") || contains_text(input, "what have i") ||
+        contains_text(input, "do you remember") || contains_text(input, "remember that")) {
+        return false;
+    }
+
+    if (contains_text(input, "i am ") || contains_text(input, "i'm ") || contains_text(input, "call me ")) {
+        return false;
+    }
+
+    return true;
+}
+
+std::string format_rag_prompt(const std::string & retrieved_context, const std::string & user_input) {
+    return "Answer using the retrieved context when it contains the requested facts. "
+           "The current conversation and the user's own statements are authoritative for session facts, identity, names, and preferences. "
+           "For direct lookup questions, reply with the exact facts from the retrieved context. "
+           "Do not refuse, speculate, or add policy commentary when the answer is present in the retrieved context. "
+           "If the retrieved context does not contain the answer, say that the answer was not found in the retrieved context.\n\n"
+           "Retrieved context:\n" +
+           retrieved_context + "User question:\n" + user_input;
 }
 
 std::string augment_prompt_with_rag(RagState * rag_state, const std::string & user_input) {
-    if (rag_state == nullptr || trim(user_input).empty()) {
+    if (rag_state == nullptr || !should_use_rag_for_input(user_input)) {
         return user_input;
     }
 
@@ -397,20 +492,16 @@ std::string augment_prompt_with_rag(RagState * rag_state, const std::string & us
         return user_input;
     }
 
-    std::vector<std::string> sources;
     std::string retrieved_context;
     for (size_t rank = 0; rank < retrieved_count; ++rank) {
         const IndexedChunk & chunk = rag_state->chunks[scored_chunks[rank].index];
-        sources.push_back(chunk.source);
-        retrieved_context += "[Source: " + chunk.source + "]\n";
         retrieved_context += chunk.text;
         retrieved_context += "\n\n";
     }
 
-    debug_log(rag_state->options, "retrieved " + std::to_string(retrieved_count) + " chunks: " + join_strings(sources, ", "));
+    if (rag_state->options.debug) {
+        std::cerr << "[retrieved " << retrieved_count << " chunks]\n";
+    }
 
-    return "Use the retrieved context when it is relevant to the user's request. "
-           "If it is not relevant, answer normally.\n\n"
-           "Retrieved context:\n" +
-           retrieved_context + "User question:\n" + user_input;
+    return format_rag_prompt(retrieved_context, user_input);
 }

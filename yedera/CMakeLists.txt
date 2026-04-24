@@ -51,10 +51,7 @@ add_executable(yedera
     src/runtime.cpp)
 add_custom_command(TARGET yedera POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E rm -f
-        $<TARGET_FILE_DIR:yedera>/yedera.cfg
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/yedera.conf
-        $<TARGET_FILE_DIR:yedera>/yedera.conf)
+        $<TARGET_FILE_DIR:yedera>/yedera.cfg)
 target_include_directories(yedera PRIVATE
     ${YEDERA_LLAMA_CPP_DIR}/common
     ${YEDERA_LLAMA_CPP_DIR}/vendor)
@@ -78,6 +75,7 @@ if (BUILD_TESTING)
     add_executable(yedera-config-tests
         tests/cli_tests.cpp
         src/cli.cpp
+        src/rag.cpp
         src/pull.cpp
         src/paths.cpp)
     target_link_libraries(yedera-config-tests PRIVATE llama Threads::Threads cpp-httplib)

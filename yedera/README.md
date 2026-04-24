@@ -47,7 +47,7 @@ Interactive chat using the model configured in `yedera.conf`:
 
 Inside interactive chat, use `/learn /path/to/file.md` to index one extra file or directory for the current session. If you want to send a literal prompt that starts with `/`, prefix it with a second slash, for example `//learn this is part of the prompt`.
 
-When the current entry is empty, pressing `Esc` toggles the prompt between normal chat mode `> ` and file-learn mode `: `. In `: ` mode, entering a path learns that file or directory without leaving the chat loop. Press `Esc` again on an empty `: ` prompt to return to normal chat mode.
+When the current entry is empty, pressing `Esc` toggles the prompt between normal chat mode `> ` and file-learn mode `: `. In `: ` mode, entering a path or wildcard learns matching files without leaving the chat loop. Relative entries resolve under `rag_documents_path`; absolute entries are used as entered. Each learned file prints its absolute path with RAG tuning progress, then the prompt returns to normal chat mode `> `. Press `Esc` again on an empty `: ` prompt to return to normal chat mode without learning.
 
 Using config defaults instead of passing the model each time:
 
@@ -78,7 +78,7 @@ Command:
 - `-i`, `--interactive`: start a chat loop
 - interactive chat command `/learn PATH`: learn a file or directory for the current session without leaving the chat loop
 - interactive chat escape `//TEXT`: send a literal prompt that starts with `/`
-- interactive chat key `Esc` on an empty prompt: toggle between `> ` chat mode and `: ` file-learn mode
+- interactive chat key `Esc` on an empty prompt: toggle between `> ` chat mode and `: ` file-learn mode; relative entries in file-learn mode resolve under `rag_documents_path`, and wildcards are accepted
 - `-s`, `--system-prompt`: override the assistant system prompt from config
 - `-c`, `--ctx-size`: context size, default `2048`
 - `-n`, `--n-predict`: max generated tokens per response, default `256`

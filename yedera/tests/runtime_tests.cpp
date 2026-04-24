@@ -116,11 +116,16 @@ struct PtyStep {
     int timeout_ms = 60000;
 };
 
-std::string read_pty_until(int master_fd, std::string & output, std::string_view needle, int timeout_ms) {
+std::string read_pty_until(
+    int master_fd,
+    std::string & output,
+    std::string_view needle,
+    int timeout_ms,
+    size_t search_start = 0) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     std::array<char, 4096> buffer{};
 
-    while (needle.empty() || output.find(needle) == std::string::npos) {
+    while (needle.empty() || output.find(needle, search_start) == std::string::npos) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
             throw TestFailure("timed out waiting for PTY output: " + std::string(needle) + "\nOutput:\n" + output);
@@ -182,6 +187,7 @@ std::string run_command_in_pty(const std::vector<std::string> & argv_values, con
 
     std::string output;
     for (const PtyStep & step : steps) {
+        const size_t wait_start = output.size();
         size_t written = 0;
         while (written < step.input.size()) {
             const ssize_t count = write(master_fd, step.input.data() + written, 1);
@@ -203,7 +209,7 @@ std::string run_command_in_pty(const std::vector<std::string> & argv_values, con
         }
 
         if (!step.wait_for.empty()) {
-            read_pty_until(master_fd, output, step.wait_for, step.timeout_ms);
+            read_pty_until(master_fd, output, step.wait_for, step.timeout_ms, wait_start);
         }
     }
 
@@ -475,7 +481,7 @@ void test_rag_retrieval_reports_indexed_documents() {
     expect_contains(output, "[rag] " + (rag_dir / "note.md").lexically_normal().string(), "RAG debug output should list learned markdown files");
     expect_contains(output, "[rag] " + (rag_dir / "odd.txt").lexically_normal().string(), "RAG debug output should list learned text files");
     expect_contains(output, "[debug] RAG: indexed ", "RAG should index the configured documents");
-    expect_contains(output, "[debug] RAG: retrieved ", "RAG should report the retrieved document chunks");
+    expect_contains(output, "[retrieved ", "RAG should report the retrieved document chunks");
 }
 
 void test_interactive_learn_command_does_not_conflict_with_prompt() {
@@ -508,10 +514,10 @@ void test_interactive_learn_command_does_not_conflict_with_prompt() {
     expect_contains(output, "[debug] RAG: indexing documents from " + learn_file.lexically_normal().string(), "interactive /learn should index the requested file");
     expect_contains(output, "[rag] " + learn_file.lexically_normal().string(), "interactive /learn should list the learned file");
     expect_contains(output, "[rag] learned " + learn_file.lexically_normal().string(), "interactive /learn should acknowledge the learned source");
-    expect_contains(output, "[debug] RAG: retrieved ", "escaped //learn prompt should still reach normal RAG retrieval");
+    expect_contains(output, "[retrieved ", "escaped //learn prompt should still reach normal RAG retrieval");
 }
 
-void test_escape_toggles_learn_prompt_when_entry_is_clear() {
+void test_escape_file_entry_resolves_paths_and_returns_to_chat_prompt() {
 #if !defined(__linux__)
     return;
 #else
@@ -519,14 +525,23 @@ void test_escape_toggles_learn_prompt_when_entry_is_clear() {
     expect_true(std::filesystem::exists(model_path), "runtime smoke test model is missing");
 
     const TempDirectory temp_dir;
-    const std::filesystem::path learn_file = temp_dir.path / "escape-note.md";
+    const std::filesystem::path rag_dir = temp_dir.path / "rag";
+    std::filesystem::create_directories(rag_dir);
+    const std::filesystem::path relative_file = rag_dir / "escape-note.md";
+    const std::filesystem::path absolute_file = temp_dir.path / "absolute-note.md";
+    const std::filesystem::path wildcard_a = rag_dir / "wild-a.md";
+    const std::filesystem::path wildcard_b = rag_dir / "wild-b.md";
     const std::filesystem::path config_path = temp_dir.path / "yedera.conf";
-    write_file(learn_file, "escape mode keyword\n\nThis file is learned from the ESC prompt mode.\n");
+    write_file(relative_file, "escape mode keyword\n\nThis file is learned from the ESC prompt mode.\n");
+    write_file(absolute_file, "absolute escape keyword\n\nThis absolute file is learned from the ESC prompt mode.\n");
+    write_file(wildcard_a, "wildcard escape alpha\n\nThis wildcard file is learned from the ESC prompt mode.\n");
+    write_file(wildcard_b, "wildcard escape beta\n\nThis wildcard file is learned from the ESC prompt mode.\n");
     write_file(
         config_path,
         "prompt = \"You are a test assistant.\"\n"
         "model_path = \"" + model_path.string() + "\"\n"
         "model_embeddings = \"" + model_path.string() + "\"\n"
+        "rag_documents_path = \"" + rag_dir.string() + "\"\n"
         "n_gpu_layers = 0\n"
         "debug = true\n"
         "verbose = false\n");
@@ -552,17 +567,70 @@ void test_escape_toggles_learn_prompt_when_entry_is_clear() {
             {"\x1b", "\r\x1b[2K: "},
             {"\x1b", "\r\x1b[2K> "},
             {"\x1b", "\r\x1b[2K: "},
-            {learn_file.string() + "\n", "[rag] learned " + learn_file.lexically_normal().string()},
-            {"\x1b", "\r\x1b[2K> "},
-            {"escape mode keyword\n", "[debug] RAG: retrieved "},
+            {"escape-note.md\n", "[rag] learned " + relative_file.lexically_normal().string()},
+            {"\x1b", "\r\x1b[2K: "},
+            {absolute_file.string() + "\n", "[rag] learned " + absolute_file.lexically_normal().string()},
+            {"\x1b", "\r\x1b[2K: "},
+            {"wild-*.md\n", "[rag] learned " + wildcard_b.lexically_normal().string()},
+            {"escape mode keyword\n", "[retrieved "},
             {"\n", ""},
         });
     const std::string output = normalize_terminal_output(raw_output);
 
     expect_contains(raw_output, "\r\x1b[2K: ", "ESC on an empty entry should switch to the learn-file prompt");
     expect_contains(raw_output, "\r\x1b[2K> ", "ESC on an empty learn prompt should switch back to the chat prompt");
-    expect_contains(output, "[rag] learned " + learn_file.lexically_normal().string(), "ESC learn mode should accept a file path");
-    expect_contains(output, "[debug] RAG: retrieved ", "after toggling back to chat, the normal chat prompt should still run RAG retrieval");
+    expect_contains(output, relative_file.lexically_normal().string() + " <100% rag tuning>", "relative ESC file entry should show RAG tuning progress for the resolved file");
+    expect_contains(output, "[rag] learned " + relative_file.lexically_normal().string(), "relative ESC file entry should resolve under rag_documents_path");
+    expect_contains(output, "[rag] learned " + absolute_file.lexically_normal().string(), "absolute ESC file entry should be used as entered");
+    expect_contains(output, wildcard_a.lexically_normal().string() + " <50% rag tuning>", "wildcard ESC file entry should report progress across matched files");
+    expect_contains(output, wildcard_b.lexically_normal().string() + " <100% rag tuning>", "wildcard ESC file entry should complete progress at 100%");
+    expect_contains(output, "[retrieved ", "after toggling back to chat, the normal chat prompt should still run RAG retrieval");
+#endif
+}
+
+void test_chat_prompt_arrow_keys_navigate_history() {
+#if !defined(__linux__)
+    return;
+#else
+    const std::filesystem::path model_path = binary_path().parent_path() / "model" / "llama3.2-1b.gguf";
+    expect_true(std::filesystem::exists(model_path), "runtime smoke test model is missing");
+
+    const TempDirectory temp_dir;
+    const std::filesystem::path config_path = temp_dir.path / "yedera.conf";
+    write_file(
+        config_path,
+        "prompt = \"You are a test assistant.\"\n"
+        "model_path = \"" + model_path.string() + "\"\n"
+        "n_gpu_layers = 0\n"
+        "debug = false\n"
+        "verbose = false\n");
+
+    const std::string raw_output = run_command_in_pty(
+        {
+            binary_path().string(),
+            "--config",
+            config_path.string(),
+            "--interactive",
+            "--n-predict",
+            "1",
+            "--temperature",
+            "0",
+            "--top-p",
+            "1",
+            "--min-p",
+            "0",
+            "--seed",
+            "1",
+        },
+        {
+            {"history alpha\n", "\n> "},
+            {"\x1b[A", "\r\x1b[2K> history alpha"},
+            {"\x1b[B", "\r\x1b[2K> "},
+            {"\n", ""},
+        });
+
+    expect_contains(raw_output, "\r\x1b[2K> history alpha", "up arrow should recall the previous chat entry");
+    expect_contains(raw_output, "\r\x1b[2K> ", "down arrow should move forward in chat history");
 #endif
 }
 
@@ -577,7 +645,8 @@ int main() {
         test_debug_output_stays_filtered();
         test_rag_retrieval_reports_indexed_documents();
         test_interactive_learn_command_does_not_conflict_with_prompt();
-        test_escape_toggles_learn_prompt_when_entry_is_clear();
+        test_escape_file_entry_resolves_paths_and_returns_to_chat_prompt();
+        test_chat_prompt_arrow_keys_navigate_history();
         std::cout << "runtime tests passed\n";
         return 0;
     } catch (const TestFailure & error) {

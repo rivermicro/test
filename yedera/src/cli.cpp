@@ -269,7 +269,8 @@ void print_usage(const char * program_name) {
         << "Interactive chat commands:\n"
         << "  /learn PATH               Learn a file or directory for the current session\n"
         << "  //TEXT                    Send a literal prompt that starts with /\n"
-        << "  ESC on an empty line      Toggle between `> ` chat mode and `: ` file-learn mode\n";
+        << "  ESC on an empty line      Toggle between `> ` chat mode and `: ` file-learn mode\n"
+        << "                            In file-learn mode, relative paths and wildcards resolve under rag_documents_path\n";
 }
 
 OptionOverrides parse_args(int argc, char ** argv) {

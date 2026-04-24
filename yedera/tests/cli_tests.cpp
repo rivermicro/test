@@ -1,5 +1,6 @@
 #include "cli.hpp"
 #include "pull.hpp"
+#include "rag.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -204,6 +205,32 @@ void test_plan_model_download_skips_existing_file() {
     expect_true(!plan.has_value(), "existing configured file should not trigger a download plan");
 }
 
+void test_format_rag_prompt_prefers_direct_fact_lookup() {
+    const std::string prompt = format_rag_prompt(
+        "pinu phone number: 49232\nlisa phone number: 11123\n\n",
+        "whats lisa and pinu phone number?");
+
+    expect_true(
+        prompt.find("The current conversation and the user's own statements are authoritative") != std::string::npos,
+        "RAG prompt should not override session facts from the chat");
+    expect_true(
+        prompt.find("For direct lookup questions, reply with the exact facts from the retrieved context.") != std::string::npos,
+        "RAG prompt should instruct the model to answer direct fact lookups from retrieved context");
+    expect_true(
+        prompt.find("Do not refuse, speculate, or add policy commentary") != std::string::npos,
+        "RAG prompt should suppress generic refusals when context already contains the answer");
+    expect_true(
+        prompt.find("pinu phone number: 49232") != std::string::npos,
+        "RAG prompt should include the retrieved facts");
+}
+
+void test_should_use_rag_skips_session_memory_prompts() {
+    expect_true(!should_use_rag_for_input("what is my name?"), "name questions should use chat memory instead of RAG");
+    expect_true(!should_use_rag_for_input("my name is cris"), "user-provided identity facts should not trigger RAG");
+    expect_true(should_use_rag_for_input("item id for 365905899470"), "document lookup prompts should still use RAG");
+    expect_true(should_use_rag_for_input("i am looking for the price of item 365905899470"), "lookup prompts with first-person wording should still use RAG");
+}
+
 } // namespace
 
 int main() {
@@ -215,6 +242,8 @@ int main() {
         test_resolve_options_resolves_relative_config_paths();
         test_plan_model_download_maps_known_alias();
         test_plan_model_download_skips_existing_file();
+        test_format_rag_prompt_prefers_direct_fact_lookup();
+        test_should_use_rag_skips_session_memory_prompts();
         std::cout << "cli tests passed\n";
         return 0;
     } catch (const TestFailure & error) {

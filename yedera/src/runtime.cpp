@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <glob.h>
 #include <iostream>
 #include <memory>
 #include <poll.h>
@@ -84,6 +85,24 @@ bool has_pending_input(int fd, int timeout_ms) {
     return result > 0 && (descriptor.revents & POLLIN) != 0;
 }
 
+std::string read_escape_sequence(int fd) {
+    std::string sequence;
+    while (sequence.size() < 8 && has_pending_input(fd, sequence.empty() ? 0 : 50)) {
+        char character = 0;
+        const ssize_t bytes_read = read(fd, &character, 1);
+        if (bytes_read <= 0) {
+            break;
+        }
+
+        sequence.push_back(character);
+        if (std::isalpha(static_cast<unsigned char>(character)) || character == '~') {
+            break;
+        }
+    }
+
+    return sequence;
+}
+
 void discard_escape_sequence(int fd) {
     while (has_pending_input(fd, 0)) {
         char discard = 0;
@@ -118,7 +137,79 @@ std::string display_source_path(const std::string & source_path) {
     return std::filesystem::path(source_path).lexically_normal().string();
 }
 
-InteractiveReadResult read_interactive_input(PromptMode & mode) {
+bool contains_text(const std::string & value, const std::string & needle) {
+    return value.find(needle) != std::string::npos;
+}
+
+std::string to_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+bool is_session_memory_statement(const std::string & text) {
+    const std::string input = to_lower(trim(text));
+    return contains_text(input, "my name is ") || contains_text(input, "call me ");
+}
+
+bool contains_wildcard(const std::string & path_pattern) {
+    return path_pattern.find_first_of("*?[") != std::string::npos;
+}
+
+std::filesystem::path resolve_learn_entry_path(
+    const Options & options,
+    const std::string & source_path,
+    bool relative_to_rag_documents_path) {
+    const std::filesystem::path entered_path(source_path);
+    if (entered_path.is_absolute() || !relative_to_rag_documents_path || options.rag_documents_path.empty()) {
+        return entered_path.lexically_normal();
+    }
+
+    return (std::filesystem::path(options.rag_documents_path) / entered_path).lexically_normal();
+}
+
+std::vector<std::filesystem::path> expand_learn_entry_paths(
+    const Options & options,
+    const std::string & source_path,
+    bool relative_to_rag_documents_path) {
+    const std::string trimmed_path = trim(source_path);
+    if (trimmed_path.empty()) {
+        return {};
+    }
+
+    const std::filesystem::path resolved_path =
+        resolve_learn_entry_path(options, trimmed_path, relative_to_rag_documents_path);
+    const std::string pattern = resolved_path.string();
+    if (!contains_wildcard(pattern)) {
+        return {resolved_path};
+    }
+
+    glob_t glob_result{};
+    const int result = glob(pattern.c_str(), 0, nullptr, &glob_result);
+    std::vector<std::filesystem::path> paths;
+    if (result == 0) {
+        paths.reserve(glob_result.gl_pathc);
+        for (size_t index = 0; index < glob_result.gl_pathc; ++index) {
+            paths.emplace_back(std::filesystem::path(glob_result.gl_pathv[index]).lexically_normal());
+        }
+    }
+    globfree(&glob_result);
+
+    if (paths.empty()) {
+        return {resolved_path};
+    }
+
+    std::sort(paths.begin(), paths.end());
+    return paths;
+}
+
+void print_rag_tuning_progress(const std::string & source_path, size_t completed, size_t total) {
+    const size_t percent = total == 0 ? 100 : std::min<size_t>(100, (completed * 100) / total);
+    std::cout << display_source_path(source_path) << " <" << percent << "% rag tuning>\n" << std::flush;
+}
+
+InteractiveReadResult read_interactive_input(PromptMode & mode, const std::vector<std::string> & chat_history) {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
         std::cout << prompt_text(mode) << std::flush;
         std::string line;
@@ -135,6 +226,8 @@ InteractiveReadResult read_interactive_input(PromptMode & mode) {
 
     TerminalModeGuard terminal_mode(STDIN_FILENO);
     std::string buffer;
+    std::string draft_buffer;
+    size_t history_index = chat_history.size();
     std::cout << prompt_text(mode) << std::flush;
 
     while (true) {
@@ -169,7 +262,29 @@ InteractiveReadResult read_interactive_input(PromptMode & mode) {
         }
 
         if (byte == 27) {
-            if (has_pending_input(STDIN_FILENO, 10)) {
+            if (has_pending_input(STDIN_FILENO, 50)) {
+                const std::string sequence = read_escape_sequence(STDIN_FILENO);
+                if (mode == PromptMode::Chat && sequence == "[A" && !chat_history.empty()) {
+                    if (history_index == chat_history.size()) {
+                        draft_buffer = buffer;
+                    }
+                    if (history_index > 0) {
+                        --history_index;
+                        buffer = chat_history[history_index];
+                        redraw_prompt(mode, buffer);
+                    }
+                    continue;
+                }
+
+                if (mode == PromptMode::Chat && sequence == "[B") {
+                    if (history_index < chat_history.size()) {
+                        ++history_index;
+                        buffer = history_index == chat_history.size() ? draft_buffer : chat_history[history_index];
+                        redraw_prompt(mode, buffer);
+                    }
+                    continue;
+                }
+
                 discard_escape_sequence(STDIN_FILENO);
                 continue;
             }
@@ -233,6 +348,26 @@ std::string format_messages(llama_model * model, std::vector<OwnedMessage> & mes
     return std::string(buffer.data(), rendered);
 }
 
+std::vector<OwnedMessage> build_prompt_history(const std::vector<OwnedMessage> & messages, const std::string & user_input) {
+    if (should_use_rag_for_input(user_input)) {
+        return messages;
+    }
+
+    std::vector<OwnedMessage> prompt_history;
+    for (const auto & message : messages) {
+        if (message.role == "system") {
+            prompt_history.push_back(message);
+            continue;
+        }
+
+        if (message.role == "user" && is_session_memory_statement(message.content)) {
+            prompt_history.push_back(message);
+        }
+    }
+
+    return prompt_history;
+}
+
 } // namespace
 
 void run_inference(const Options & options) {
@@ -286,33 +421,50 @@ void run_inference(const Options & options) {
     std::vector<char> formatted_buffer(static_cast<size_t>(std::max(4096, options.n_ctx * 4)));
 
     auto generate = [&](const std::string & prompt) {
-        const bool is_first = llama_memory_seq_pos_max(llama_get_memory(context), 0) == -1;
-        const int token_count = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, is_first, true);
+        llama_memory_clear(llama_get_memory(context), true);
+        llama_sampler_reset(sampler);
+
+        const int token_count = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, true, true);
         if (token_count <= 0) {
             throw std::runtime_error("failed to tokenize prompt");
         }
 
         std::vector<llama_token> prompt_tokens(static_cast<size_t>(token_count));
-        if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), is_first, true) < 0) {
+        if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), true, true) < 0) {
             throw std::runtime_error("failed to tokenize prompt");
         }
 
-        llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+        const int ctx_size = llama_n_ctx(context);
+        if (static_cast<int>(prompt_tokens.size()) >= ctx_size) {
+            throw std::runtime_error("context size exceeded; increase --ctx-size or shorten the conversation");
+        }
+
+        const size_t max_batch_tokens = std::max<size_t>(1, llama_n_batch(context));
+        auto decode_tokens = [&](llama_token * tokens, size_t token_size) {
+            size_t offset = 0;
+            while (offset < token_size) {
+                const size_t chunk_size = std::min(max_batch_tokens, token_size - offset);
+                llama_batch batch = llama_batch_get_one(tokens + offset, static_cast<int32_t>(chunk_size));
+                const int ctx_used = llama_memory_seq_pos_max(llama_get_memory(context), 0) + 1;
+                if (ctx_used + batch.n_tokens > ctx_size) {
+                    throw std::runtime_error("context size exceeded; increase --ctx-size or shorten the conversation");
+                }
+
+                const int decode_result = llama_decode(context, batch);
+                if (decode_result != 0) {
+                    throw std::runtime_error("llama_decode failed with code " + std::to_string(decode_result));
+                }
+
+                offset += chunk_size;
+            }
+        };
+
+        decode_tokens(prompt_tokens.data(), prompt_tokens.size());
+
         std::string response;
 
         int generated = 0;
         while (generated < options.n_predict) {
-            const int ctx_size = llama_n_ctx(context);
-            const int ctx_used = llama_memory_seq_pos_max(llama_get_memory(context), 0) + 1;
-            if (ctx_used + batch.n_tokens > ctx_size) {
-                throw std::runtime_error("context size exceeded; increase --ctx-size or shorten the conversation");
-            }
-
-            const int decode_result = llama_decode(context, batch);
-            if (decode_result != 0) {
-                throw std::runtime_error("llama_decode failed with code " + std::to_string(decode_result));
-            }
-
             llama_token token = llama_sampler_sample(sampler, context, -1);
             if (llama_vocab_is_eog(vocab, token)) {
                 break;
@@ -327,8 +479,10 @@ void run_inference(const Options & options) {
             const std::string piece(piece_buffer, static_cast<size_t>(piece_length));
             std::cout << piece << std::flush;
             response += piece;
-            batch = llama_batch_get_one(&token, 1);
             ++generated;
+            if (generated < options.n_predict) {
+                decode_tokens(&token, 1);
+            }
         }
 
         return response;
@@ -339,16 +493,17 @@ void run_inference(const Options & options) {
         messages.push_back({"system", options.system_prompt});
     }
 
-    int previous_length = 0;
-
     auto run_turn = [&](const std::string & user_input) {
-        messages.push_back({"user", augment_prompt_with_rag(rag_state.get(), user_input)});
-        const std::string rendered = format_messages(model, messages, formatted_buffer, true);
-        const std::string incremental_prompt = rendered.substr(static_cast<size_t>(previous_length));
-        const std::string response = generate(incremental_prompt);
+        const bool use_rag = should_use_rag_for_input(user_input);
+        std::vector<OwnedMessage> prompt_messages = build_prompt_history(messages, user_input);
+        prompt_messages.push_back({"user", augment_prompt_with_rag(rag_state.get(), user_input)});
+        const std::string rendered = format_messages(model, prompt_messages, formatted_buffer, true);
+        const std::string response = generate(rendered);
         std::cout << '\n';
-        messages.push_back({"assistant", response});
-        previous_length = static_cast<int>(format_messages(model, messages, formatted_buffer, false).size());
+        messages.push_back({"user", user_input});
+        if (use_rag) {
+            messages.push_back({"assistant", response});
+        }
     };
 
     if (!options.prompt.empty()) {
@@ -357,8 +512,9 @@ void run_inference(const Options & options) {
 
     if (options.interactive) {
         PromptMode prompt_mode = PromptMode::Chat;
+        std::vector<std::string> chat_history;
         while (true) {
-            const InteractiveReadResult input = read_interactive_input(prompt_mode);
+            const InteractiveReadResult input = read_interactive_input(prompt_mode, chat_history);
             if (input.kind == InteractiveReadResult::Kind::Eof) {
                 break;
             }
@@ -374,13 +530,20 @@ void run_inference(const Options & options) {
 
             if (prompt_mode == PromptMode::LearnFile) {
                 try {
-                    learn_rag_source(rag_state, options, user_input);
-                    std::cout << "[rag] learned " << display_source_path(user_input) << '\n';
+                    const std::vector<std::filesystem::path> source_paths =
+                        expand_learn_entry_paths(options, user_input, true);
+                    learn_rag_sources(rag_state, options, source_paths, print_rag_tuning_progress);
+                    for (const auto & source_path : source_paths) {
+                        std::cout << "[rag] learned " << display_source_path(source_path.string()) << '\n';
+                    }
+                    prompt_mode = PromptMode::Chat;
                 } catch (const std::exception & error) {
                     std::cerr << "error: " << error.what() << '\n';
                 }
                 continue;
             }
+
+            chat_history.push_back(user_input);
 
             const std::string trimmed_input = trim(user_input);
             if (starts_with(trimmed_input, "//")) {
@@ -391,8 +554,12 @@ void run_inference(const Options & options) {
             if (starts_with(trimmed_input, "/learn")) {
                 const std::string source_path = trim(trimmed_input.substr(std::string("/learn").size()));
                 try {
-                    learn_rag_source(rag_state, options, source_path);
-                    std::cout << "[rag] learned " << display_source_path(source_path) << '\n';
+                    const std::vector<std::filesystem::path> source_paths =
+                        expand_learn_entry_paths(options, source_path, false);
+                    learn_rag_sources(rag_state, options, source_paths, {});
+                    for (const auto & learned_path : source_paths) {
+                        std::cout << "[rag] learned " << display_source_path(learned_path.string()) << '\n';
+                    }
                 } catch (const std::exception & error) {
                     std::cerr << "error: " << error.what() << '\n';
                 }
