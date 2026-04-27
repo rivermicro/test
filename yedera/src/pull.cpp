@@ -47,6 +47,13 @@ const std::map<std::string, PullTarget> & known_pull_targets() {
                 "llama3.2-3b.gguf",
             },
         },
+        {
+            "gpt-oss-20b.gguf",
+            {
+                "https://huggingface.co/ggml-org/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-mxfp4.gguf?download=true",
+                "gpt-oss-20b.gguf",
+            },
+        },
     };
 
     return targets;

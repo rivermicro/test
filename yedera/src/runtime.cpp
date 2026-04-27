@@ -489,6 +489,151 @@ std::vector<llama_chat_message> to_llama_messages(const std::vector<OwnedMessage
     return raw_messages;
 }
 
+bool template_uses_channel_messages(llama_model * model) {
+    const char * template_text = llama_model_chat_template(model, nullptr);
+    if (template_text == nullptr) {
+        return false;
+    }
+
+    const std::string_view view(template_text);
+    return view.find("<|channel|>") != std::string_view::npos &&
+        view.find("<|message|>") != std::string_view::npos;
+}
+
+size_t find_channel_message_end(const std::string & response, size_t start_offset) {
+    size_t end_offset = response.find("<|return|>", start_offset);
+
+    const size_t call_offset = response.find("<|call|>", start_offset);
+    if (call_offset != std::string::npos && (end_offset == std::string::npos || call_offset < end_offset)) {
+        end_offset = call_offset;
+    }
+
+    const size_t message_end_offset = response.find("<|end|>", start_offset);
+    if (message_end_offset != std::string::npos && (end_offset == std::string::npos || message_end_offset < end_offset)) {
+        end_offset = message_end_offset;
+    }
+
+    const size_t next_message_offset = response.find("<|start|>", start_offset);
+    if (next_message_offset != std::string::npos && (end_offset == std::string::npos || next_message_offset < end_offset)) {
+        end_offset = next_message_offset;
+    }
+
+    return end_offset == std::string::npos ? response.size() : end_offset;
+}
+
+bool channel_message_invokes_function(const std::string & response, size_t channel_offset, size_t message_offset) {
+    const size_t function_offset = response.find("to=functions.", channel_offset);
+    return function_offset != std::string::npos && function_offset < message_offset;
+}
+
+std::string extract_channel_message(const std::string & response, const std::string & channel_name) {
+    const std::string marker = std::string("<|channel|>") + channel_name;
+    const size_t channel_offset = response.rfind(marker);
+    if (channel_offset == std::string::npos) {
+        return "";
+    }
+
+    const size_t message_offset = response.find("<|message|>", channel_offset);
+    if (message_offset == std::string::npos) {
+        return "";
+    }
+
+    if (channel_name == "commentary" && channel_message_invokes_function(response, channel_offset, message_offset)) {
+        return "";
+    }
+
+    const size_t content_offset = message_offset + std::string("<|message|>").size();
+    const size_t end_offset = find_channel_message_end(response, content_offset);
+    return response.substr(content_offset, end_offset - content_offset);
+}
+
+std::string extract_channel_name_at_offset(const std::string & response, size_t channel_offset) {
+    const size_t name_offset = channel_offset + std::string("<|channel|>").size();
+    const size_t message_offset = response.find("<|message|>", name_offset);
+    if (message_offset == std::string::npos) {
+        return "";
+    }
+
+    std::string channel_name = response.substr(name_offset, message_offset - name_offset);
+    const size_t suffix_offset = channel_name.find_first_of(" \t\r\n");
+    if (suffix_offset != std::string::npos) {
+        channel_name.resize(suffix_offset);
+    }
+
+    return channel_name;
+}
+
+std::string extract_last_channel_message(const std::string & response) {
+    const std::string marker = "<|channel|>";
+    const size_t channel_offset = response.rfind(marker);
+    if (channel_offset == std::string::npos) {
+        return "";
+    }
+
+    const size_t message_offset = response.find("<|message|>", channel_offset + marker.size());
+    if (message_offset == std::string::npos) {
+        return "";
+    }
+
+    const size_t content_offset = message_offset + std::string("<|message|>").size();
+    const size_t end_offset = find_channel_message_end(response, content_offset);
+    return response.substr(content_offset, end_offset - content_offset);
+}
+
+std::string extract_streamable_channel_message(const std::string & response) {
+    const std::string final_message = extract_channel_message(response, "final");
+    if (!final_message.empty() || response.find("<|channel|>final") != std::string::npos) {
+        return final_message;
+    }
+
+    const std::string marker = "<|channel|>";
+    const size_t channel_offset = response.rfind(marker);
+    if (channel_offset == std::string::npos) {
+        return "";
+    }
+
+    const std::string channel_name = extract_channel_name_at_offset(response, channel_offset);
+    if (channel_name.empty() || channel_name == "analysis") {
+        return "";
+    }
+
+    const size_t message_offset = response.find("<|message|>", channel_offset + marker.size());
+    if (message_offset == std::string::npos) {
+        return "";
+    }
+
+    if (channel_name == "commentary" && channel_message_invokes_function(response, channel_offset, message_offset)) {
+        return "";
+    }
+
+    const size_t content_offset = message_offset + std::string("<|message|>").size();
+    const size_t end_offset = find_channel_message_end(response, content_offset);
+    return response.substr(content_offset, end_offset - content_offset);
+}
+
+std::string format_channel_response_for_display(const std::string & response) {
+    if (response.find("<|channel|>") == std::string::npos) {
+        return response;
+    }
+
+    const std::string final_message = extract_channel_message(response, "final");
+    if (!final_message.empty() || response.find("<|channel|>final") != std::string::npos) {
+        return final_message;
+    }
+
+    const std::string commentary_message = extract_channel_message(response, "commentary");
+    if (!commentary_message.empty() || response.find("<|channel|>commentary") != std::string::npos) {
+        return commentary_message;
+    }
+
+    return extract_last_channel_message(response);
+}
+
+bool response_has_channel_terminator(const std::string & response) {
+    return response.find("<|return|>") != std::string::npos ||
+        response.find("<|call|>") != std::string::npos;
+}
+
 std::string format_messages(llama_model * model, std::vector<OwnedMessage> & messages, std::vector<char> & buffer, bool add_assistant) {
     const char * template_text = llama_model_chat_template(model, nullptr);
     if (template_text == nullptr) {
@@ -583,10 +728,12 @@ void run_inference(const Options & options) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
     std::vector<char> formatted_buffer(static_cast<size_t>(std::max(4096, options.n_ctx * 4)));
+    const bool model_uses_structured_channels = template_uses_channel_messages(model);
 
     auto generate = [&](const std::string & prompt) {
         llama_memory_clear(llama_get_memory(context), true);
         llama_sampler_reset(sampler);
+        llama_memory_t memory = llama_get_memory(context);
 
         const int token_count = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), nullptr, 0, true, true);
         if (token_count <= 0) {
@@ -603,16 +750,46 @@ void run_inference(const Options & options) {
             throw std::runtime_error("context size exceeded; increase --ctx-size or shorten the conversation");
         }
 
+        const int prompt_tokens_to_keep = static_cast<int>(prompt_tokens.size());
+
+        auto ensure_decode_capacity = [&](int incoming_tokens) {
+            while (true) {
+                const int ctx_used = llama_memory_seq_pos_max(memory, 0) + 1;
+                if (ctx_used + incoming_tokens <= ctx_size) {
+                    return;
+                }
+
+                if (!llama_memory_can_shift(memory)) {
+                    break;
+                }
+
+                const int discardable_tokens = ctx_used - prompt_tokens_to_keep;
+                if (discardable_tokens <= 0) {
+                    break;
+                }
+
+                const int tokens_needed = ctx_used + incoming_tokens - ctx_size;
+                const int tokens_to_discard = std::min(
+                    discardable_tokens,
+                    std::max(tokens_needed, std::max(1, discardable_tokens / 2)));
+
+                if (!llama_memory_seq_rm(memory, 0, prompt_tokens_to_keep, prompt_tokens_to_keep + tokens_to_discard)) {
+                    break;
+                }
+
+                llama_memory_seq_add(memory, 0, prompt_tokens_to_keep + tokens_to_discard, ctx_used, -tokens_to_discard);
+            }
+
+            throw std::runtime_error("context size exceeded; increase --ctx-size or shorten the conversation");
+        };
+
         const size_t max_batch_tokens = std::max<size_t>(1, llama_n_batch(context));
         auto decode_tokens = [&](llama_token * tokens, size_t token_size) {
             size_t offset = 0;
             while (offset < token_size) {
                 const size_t chunk_size = std::min(max_batch_tokens, token_size - offset);
+                ensure_decode_capacity(static_cast<int>(chunk_size));
                 llama_batch batch = llama_batch_get_one(tokens + offset, static_cast<int32_t>(chunk_size));
-                const int ctx_used = llama_memory_seq_pos_max(llama_get_memory(context), 0) + 1;
-                if (ctx_used + batch.n_tokens > ctx_size) {
-                    throw std::runtime_error("context size exceeded; increase --ctx-size or shorten the conversation");
-                }
 
                 const int decode_result = llama_decode(context, batch);
                 if (decode_result != 0) {
@@ -626,13 +803,22 @@ void run_inference(const Options & options) {
         decode_tokens(prompt_tokens.data(), prompt_tokens.size());
 
         std::string response;
+        std::string streamed_response;
 
         int generated = 0;
-        while (generated < options.n_predict) {
+        int initial_eog_retries = 0;
+        const bool unlimited_generation = options.n_predict < 0;
+        while (unlimited_generation || generated < options.n_predict) {
             llama_token token = llama_sampler_sample(sampler, context, -1);
             if (llama_vocab_is_eog(vocab, token)) {
+                if (generated == 0 && initial_eog_retries < 8) {
+                    ++initial_eog_retries;
+                    continue;
+                }
                 break;
             }
+
+            initial_eog_retries = 0;
 
             char piece_buffer[256];
             const int piece_length = llama_token_to_piece(vocab, token, piece_buffer, sizeof(piece_buffer), 0, true);
@@ -641,12 +827,43 @@ void run_inference(const Options & options) {
             }
 
             const std::string piece(piece_buffer, static_cast<size_t>(piece_length));
-            std::cout << piece << std::flush;
             response += piece;
+            if (!model_uses_structured_channels) {
+                std::cout << piece << std::flush;
+            } else {
+                const std::string current_streamable_response = extract_streamable_channel_message(response);
+                if (current_streamable_response.size() >= streamed_response.size() &&
+                    current_streamable_response.compare(0, streamed_response.size(), streamed_response) == 0) {
+                    const std::string delta = current_streamable_response.substr(streamed_response.size());
+                    if (!delta.empty()) {
+                        std::cout << delta << std::flush;
+                        streamed_response = current_streamable_response;
+                    }
+                }
+            }
             ++generated;
-            if (generated < options.n_predict) {
+
+            if (model_uses_structured_channels && response_has_channel_terminator(response)) {
+                break;
+            }
+
+            if (unlimited_generation || generated < options.n_predict) {
                 decode_tokens(&token, 1);
             }
+        }
+
+        if (model_uses_structured_channels) {
+            const std::string display_response = format_channel_response_for_display(response);
+            if (display_response.size() >= streamed_response.size() &&
+                display_response.compare(0, streamed_response.size(), streamed_response) == 0) {
+                const std::string tail = display_response.substr(streamed_response.size());
+                if (!tail.empty()) {
+                    std::cout << tail << std::flush;
+                }
+            } else if (streamed_response.empty() && !display_response.empty()) {
+                std::cout << display_response << std::flush;
+            }
+            return display_response;
         }
 
         return response;

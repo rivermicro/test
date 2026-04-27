@@ -51,7 +51,12 @@ add_executable(yedera
     src/runtime.cpp)
 add_custom_command(TARGET yedera POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E rm -f
-        $<TARGET_FILE_DIR:yedera>/yedera.cfg)
+        $<TARGET_FILE_DIR:yedera>/yedera.cfg
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+        $<TARGET_FILE_DIR:yedera>/yedera.conf
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        ${CMAKE_CURRENT_SOURCE_DIR}/yedera.conf
+        $<TARGET_FILE_DIR:yedera>/yedera.conf)
 target_include_directories(yedera PRIVATE
     ${YEDERA_LLAMA_CPP_DIR}/common
     ${YEDERA_LLAMA_CPP_DIR}/vendor)
@@ -121,6 +126,22 @@ if (BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
 
     add_test(
+        NAME yedera-cli-long-output-context-shift-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=long_output_context_shift
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
+        NAME yedera-cli-unlimited-n-predict-test
+        COMMAND ${CMAKE_COMMAND}
+            -DCASE=unlimited_n_predict
+            -DYEDERA_BINARY=$<TARGET_FILE:yedera>
+            -DYEDERA_BINARY_DIR=$<TARGET_FILE_DIR:yedera>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration_test.cmake)
+
+    add_test(
         NAME yedera-cli-learn-multi-entry-test
         COMMAND ${CMAKE_COMMAND}
             -DCASE=learn_multi_entry_syntax
@@ -135,6 +156,8 @@ if (BUILD_TESTING)
         yedera-cli-home-config-test
         yedera-cli-missing-config-test
         yedera-cli-no-startup-rag-test
+        yedera-cli-long-output-context-shift-test
+        yedera-cli-unlimited-n-predict-test
         yedera-cli-learn-multi-entry-test
         PROPERTIES TIMEOUT 180)
 endif()

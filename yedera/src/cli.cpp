@@ -148,8 +148,8 @@ void validate_options(const Options & options) {
         throw std::runtime_error("--ctx-size must be positive");
     }
 
-    if (options.n_predict <= 0) {
-        throw std::runtime_error("--n-predict must be positive");
+    if (options.n_predict == 0 || options.n_predict < -1) {
+        throw std::runtime_error("--n-predict must be positive or -1 for unlimited generation");
     }
 
     if (options.temperature < 0.0f) {
@@ -270,7 +270,7 @@ void print_usage(const char * program_name) {
         << "  -i, --interactive          Force interactive chat mode even when a prompt is configured\n"
         << "  -s, --system-prompt TEXT   Assistant system prompt\n"
         << "  -c, --ctx-size N           Context size (default: 2048)\n"
-        << "  -n, --n-predict N          Max generated tokens per response (default: 256)\n"
+        << "  -n, --n-predict N          Max generated tokens per response (-1 = unlimited, default: -1)\n"
         << "  --temperature N            Sampling temperature (default: 0.8)\n"
         << "  --top-p N                  Nucleus sampling top-p (default: 0.95)\n"
         << "  --min-p N                  Minimum-p filter (default: 0.05)\n"

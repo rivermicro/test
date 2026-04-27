@@ -170,6 +170,7 @@ elseif (CASE STREQUAL "no_prompt_chat")
 
     expect_contains("${output}" "> > " "empty Enter should keep chat mode active and redraw the chat prompt")
     expect_contains("${output}" "[debug] using model " "chat mode should still run through the main binary")
+    expect_not_contains("${output}" ".........." "chat mode should not emit llama.cpp dot progress during startup")
 elseif (CASE STREQUAL "current_dir_config")
     file(WRITE "${TEST_DIR}/yedera.conf"
         "prompt = \"You are a test assistant.\"\n"
@@ -238,6 +239,37 @@ elseif (CASE STREQUAL "no_startup_rag")
     expect_contains("${output}" "[debug] RAG mode enabled" "interactive RAG should remain available when embeddings are configured")
     expect_not_contains("${output}" "[rag] ${TEST_DIR}/rag/note.md" "startup should not learn files automatically")
     expect_not_contains("${output}" "→ " "startup should not list retrieved source files before any interactive learning")
+elseif (CASE STREQUAL "long_output_context_shift")
+    file(WRITE "${TEST_DIR}/yedera.conf"
+        "prompt = \"You are a test assistant.\"\n"
+        "model_path = \"${MODEL_PATH}\"\n"
+        "n_gpu_layers = 0\n"
+        "debug = false\n"
+        "verbose = false\n")
+
+    run_yedera(
+        OUTPUT output
+        STATUS status
+        WORKING_DIRECTORY "${TEST_DIR}"
+        ARGS --config "${TEST_DIR}/yedera.conf" --ctx-size 256 --n-predict 384 --temperature 0 --top-p 1 --min-p 0 --seed 1 "write a long sf story with spaceships")
+
+    expect_not_contains("${output}" "context size exceeded" "long generation should shift context instead of failing")
+elseif (CASE STREQUAL "unlimited_n_predict")
+    file(WRITE "${TEST_DIR}/yedera.conf"
+        "prompt = \"You are a test assistant.\"\n"
+        "model_path = \"${MODEL_PATH}\"\n"
+        "n_predict = -1\n"
+        "n_gpu_layers = 0\n"
+        "debug = false\n"
+        "verbose = false\n")
+
+    run_yedera(
+        OUTPUT output
+        STATUS status
+        WORKING_DIRECTORY "${TEST_DIR}"
+        ARGS --config "${TEST_DIR}/yedera.conf" --temperature 0 --top-p 1 --min-p 0 --seed 1 "Reply with one word.")
+
+    expect_not_contains("${output}" "--n-predict must be positive" "n_predict = -1 should be accepted for unlimited generation")
 elseif (CASE STREQUAL "learn_multi_entry_syntax")
     file(MAKE_DIRECTORY "${TEST_DIR}/rag")
     file(WRITE "${TEST_DIR}/rag/alpha.txt" "alpha learn token\n")
@@ -271,6 +303,7 @@ elseif (CASE STREQUAL "learn_multi_entry_syntax")
         ARGS --config "${TEST_DIR}/yedera.conf" --n-predict 8 --temperature 0 --top-p 1 --min-p 0 --seed 1)
 
     expect_not_contains("${output}" "error:" "multi-entry /learn syntax should not produce parsing or file errors")
+    expect_not_contains("${output}" ".........." "learn mode should not emit llama.cpp dot progress while loading the embeddings model")
     expect_contains("${output}" "[rag] learned ${TEST_DIR}/rag/manual.pdf" "bare *.pdf should be accepted in learn mode")
     expect_contains("${output}" "[rag] learned ${TEST_DIR}/rag/file2.pdf" "quoted *.pdf and explicit pdf entries should be accepted in learn mode")
     expect_contains("${output}" "[rag] learned ${TEST_DIR}/rag/alpha.txt" "mixed quoted wildcard lists should accept txt patterns in learn mode")

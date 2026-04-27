@@ -83,7 +83,7 @@ Command:
 - interactive chat key `Esc` on an empty prompt: toggle between `> ` chat mode and `: ` file-learn mode; relative entries in file-learn mode resolve under `rag_documents_path`, quoted entries, wildcards, and comma-separated lists are accepted, `*` rebuilds from `rag_documents_path`, `-PATH` forgets one learned file, and `-` forgets all learned RAG content
 - `-s`, `--system-prompt`: override the assistant system prompt from config
 - `-c`, `--ctx-size`: context size, default `2048`
-- `-n`, `--n-predict`: max generated tokens per response, default `256`
+- `-n`, `--n-predict`: max generated tokens per response, default `-1` (`-1` means unlimited generation)
 - `--temperature`: sampling temperature, default `0.8`
 - `--top-p`: nucleus sampling value, default `0.95`
 - `--min-p`: minimum-p filter value, default `0.05`

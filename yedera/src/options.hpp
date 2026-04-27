@@ -14,7 +14,7 @@ struct Options {
     std::string prompt;
     std::string system_prompt;
     int n_ctx = 2048;
-    int n_predict = 256;
+    int n_predict = -1;
     int n_gpu_layers = 0;
     float temperature = 0.8f;
     float top_p = 0.95f;
