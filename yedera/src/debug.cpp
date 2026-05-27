@@ -113,6 +113,10 @@ void print_backend_debug_summary(const Options & options) {
         return;
     }
 
+    if (!options.config_path.empty()) {
+        print_debug_message("using configuration file " + options.config_path);
+    }
+
     print_debug_message("using model " + describe_model_path(options.model_path));
 
     if (!options.model_embeddings.empty()) {
