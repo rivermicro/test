@@ -1,0 +1,9 @@
+# Root-level local model artifacts and other large/generated files.
+/model/
+/*.gguf
+
+# Local virtual environment.
+/.venv/
+
+# Local ad hoc logs.
+/test_output.log

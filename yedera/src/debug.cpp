@@ -20,6 +20,27 @@
 
 namespace {
 
+std::string normalize_forwarded_debug_log(std::string_view message) {
+    std::string normalized(message);
+    for (const char separator : {':', '='}) {
+        const size_t position = normalized.find(separator);
+        if (position == std::string::npos) {
+            continue;
+        }
+
+        size_t content = position + 1;
+        while (content < normalized.size() && (normalized[content] == ' ' || normalized[content] == '\t')) {
+            ++content;
+        }
+
+        if (content > position + 1) {
+            normalized.replace(position + 1, content - (position + 1), " ");
+        }
+    }
+
+    return normalized;
+}
+
 std::string describe_model_path(const std::string & configured_path) {
     const std::filesystem::path configured_model_path(configured_path);
     std::error_code model_path_error;
@@ -72,7 +93,8 @@ void llama_log_router(enum ggml_log_level level, const char * text, void * user_
 
     if (debug_state != nullptr && debug_state->enabled && should_emit_debug_log(text)) {
         finish_model_load_progress_line(debug_state);
-        std::fprintf(stderr, "%s", text);
+        const std::string normalized = normalize_forwarded_debug_log(text);
+        std::fprintf(stderr, "%s", normalized.c_str());
     }
 }
 
